@@ -17,11 +17,11 @@ devops-cloud-interview-scenarios/
 ├── 🔄 ci-cd/scenarios.md               ~120 questions
 ├── 🏗️ terraform/scenarios.md           ~100 questions
 ├── 🐳 docker/scenarios.md              ~100 questions
-├── 🐧 linux-sre/scenarios.md           (contributing section)
-├── 📊 observability/scenarios.md       (contributing section)
-├── 🌐 networking/scenarios.md          (contributing section)
-├── 🔒 security/scenarios.md            (contributing section)
-├── ⚙️ general-devops/scenarios.md      (contributing section)
+├── 🐧 linux-sre/scenarios.md           ~20 questions
+├── 📊 observability/scenarios.md       ~20 questions
+├── 🌐 networking/scenarios.md          ~20 questions
+├── 🔒 security/scenarios.md            ~20 questions
+├── ⚙️ general-devops/scenarios.md      ~20 questions
 ├── 📄 README.md (this file)
 ├── 🤝 CONTRIBUTING.md                  (how to contribute)
 ├── 📜 LICENSE
@@ -37,11 +37,11 @@ devops-cloud-interview-scenarios/
 | 🔄 [CI/CD](./ci-cd/scenarios.md) | Pipelines, GitOps, deployments, testing, secret management | ~120 |
 | 🏗️ [Terraform](./terraform/scenarios.md) | State management, modules, locking, imports, best practices | ~100 |
 | 🐳 [Docker](./docker/scenarios.md) | Images, containers, networking, multi-stage builds, security | ~100 |
-| 🐧 [Linux / SRE](./linux-sre/scenarios.md) | System administration, performance tuning, incident response | 🤝 Help Needed |
-| 📊 [Observability](./observability/scenarios.md) | Monitoring, logging, metrics, tracing, alerting | 🤝 Help Needed |
-| 🌐 [Networking](./networking/scenarios.md) | VPCs, security groups, routing, DNS, load balancing | 🤝 Help Needed |
-| 🔒 [Security](./security/scenarios.md) | IAM, secrets, encryption, compliance, supply chain | 🤝 Help Needed |
-| ⚙️ [General DevOps](./general-devops/scenarios.md) | Cross-domain, disaster recovery, automation | 🤝 Help Needed |
+| 🐧 [Linux / SRE](./linux-sre/scenarios.md) | System administration, performance tuning, incident response | ~20 |
+| 📊 [Observability](./observability/scenarios.md) | Monitoring, logging, metrics, tracing, alerting | ~20 |
+| 🌐 [Networking](./networking/scenarios.md) | VPCs, security groups, routing, DNS, load balancing | ~20 |
+| 🔒 [Security](./security/scenarios.md) | IAM, secrets, encryption, compliance, supply chain | ~20 |
+| ⚙️ [General DevOps](./general-devops/scenarios.md) | Cross-domain, disaster recovery, automation | ~20 |
 
 
 ---
