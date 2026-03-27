@@ -242,3 +242,234 @@ The `/24` is CIDR (Classless Inter-Domain Routing) notation. It means the first 
 This leaves 8 bits for host addresses ($2^8 = 256$ total addresses).
 In a standard terrestrial network, you lose 2 addresses (Network Address `.0` and Broadcast Address `.255`), leaving **254** usable IPs.
 *(Note: In an AWS VPC subnet, AWS reserves 5 addresses, leaving 251 usable IPs).*
+
+---
+
+**Q21. [L1] When architecting a new service, how do you decide between using TCP or UDP?**
+
+> *What the interviewer is testing:* Transport layer protocols, reliability vs. speed trade-offs.
+
+**Answer:**
+- **TCP (Transmission Control Protocol):** Is a connection-oriented, stateful protocol. It guarantees delivery through acknowledgments, automatically retransmits lost packets, and orders packets correctly. I would use TCP for HTTP/HTTPS, database queries, SSH, and any system where data integrity is paramount and dropping a single byte corrupts the entire file.
+- **UDP (User Datagram Protocol):** Is a connectionless, stateless protocol. It "fires and forgets" packets with no delivery guarantees, no acknowledgments, and no retransmission. It is vastly faster with less overhead. I would use UDP for video streaming, VoIP calls, online multiplayer gaming, or fast metrics (like StatsD), where missing a single frame of video is acceptable, but waiting 500ms for a retransmission would ruin the real-time experience.
+
+---
+
+**Q22. [L2] Two physical data centers are connected via two distinct ISPs. Traffic goes out via ISP 1, but the return packets from the internet come back via ISP 2. The corporate firewall immediately drops the return packets. Why?**
+
+> *What the interviewer is testing:* Asymmetric Routing, stateful firewalls.
+
+**Answer:**
+This is called **Asymmetric Routing**.
+The corporate firewall on ISP 2 is a **stateful firewall**. Stateful firewalls maintain an internal table of all outbound connections (the TCP handshake, sequence numbers, etc.). Because the initial outbound `SYN` packet left entirely through ISP 1's firewall, ISP 2’s firewall never saw the connection originate.
+When the `SYN-ACK` or data packets arrive on ISP 2, the firewall checks its state table, finds no existing outbound connection matching those IPs/ports, assumes the packet is a blind intrusion attempt, and rightfully drops it. 
+*Fix:* Ensure BGP routing enforces symmetry, or dynamically share state tables between the two firewalls (HA clustering).
+
+---
+
+**Q23. [L3] Your company hosts 100 different HTTPS websites (e.g., `clientA.com`, `clientB.com`) entirely behind a single Application Load Balancer with one single IP address. How does the ALB know which SSL/TLS certificate to present to the user during the highly cryptographic TCP handshake, before any HTTP headers are sent?**
+
+> *What the interviewer is testing:* Server Name Indication (SNI), TLS handshake internals.
+
+**Answer:**
+In the early days of the internet, this was impossible—each HTTPS domain required its own dedicated IP address because the server didn't know which website the client wanted until *after* the TLS encryption was established, but it needed to provide the right certificate *to* establish it.
+This is solved by **SNI (Server Name Indication)**.
+SNI is an extension to the TLS protocol. During the very first step of the TLS handshake (the `ClientHello` packet), the user's browser transmits the requested hostname (`clientA.com`) in **plaintext** before encryption begins. The ALB reads this plaintext SNI extension, instantly searches its certificate store, selects the correct certificate for `clientA.com`, and completes the secure handshake.
+
+---
+
+**Q24. [L1] How does the `traceroute` command actually discover the routers between your computer and a destination server?**
+
+> *What the interviewer is testing:* ICMP, TTL (Time To Live) expiration.
+
+**Answer:**
+`traceroute` cleverly exploits the IP **TTL (Time To Live)** field.
+The TTL is meant to prevent packets from looping infinitely; every router decrements the TTL by 1. If TTL hits 0, the router drops the packet and sends an `ICMP Time Exceeded` message back to the sender.
+1. `traceroute` sends a packet tailored for the destination with a TTL of **1**. The very first router decrements it to 0, drops it, and replies. `traceroute` records Router 1's IP.
+2. It sends another packet with a TTL of **2**. Router 1 passes it, Router 2 drops it and replies. It records Router 2's IP.
+3. It increments the TTL by 1 sequentially until the packet finally reaches the destination server, mapping every hop along the way.
+
+---
+
+**Q25. [L2] A malicious insider plugs a laptop into your office network switch. Suddenly, all traffic intended for the corporate router routes through the laptop first, allowing the insider to sniff passwords. How did they achieve this on a local network?**
+
+> *What the interviewer is testing:* ARP Spoofing / ARP Poisoning, Layer 2 networking.
+
+**Answer:**
+This is an **ARP Spoofing (ARP Poisoning)** attack.
+Inside a local network (Layer 2), computers communicate via MAC addresses. To find the router's MAC address, computers broadcast an "ARP Request" asking "Who has IP 192.168.1.1?".
+The attacker's laptop maliciously spams the network with fake "ARP Reply" packets, falsely claiming "I am 192.168.1.1, and my MAC address is [Attacker's MAC]". 
+Because ARP is a stateless, trusting protocol, all victims update their local ARP caches with the attacker's MAC. All traffic intended for the internet is now sent to the attacker at Layer 2, who sniffs it and silently forwards it to the true router.
+
+---
+
+**Q26. [L3] Your company policy mandates that all outbound internet traffic from 50 different AWS VPCs must be centrally inspected by a fleet of Next-Gen Firewalls (Palo Alto) before leaving AWS. Architecturally, how do you funnel all VPC outbound traffic to this inspection tier securely and without NAT overlapping?**
+
+> *What the interviewer is testing:* AWS Transit Gateway, Egress VPCs, route tables.
+
+**Answer:**
+This requires a **Hub-and-Spoke Egress Architecture** utilizing **AWS Transit Gateway (TGW)**.
+1. Deploy a central "Security VPC" (the Hub). Deploy the Firewall appliances and a NAT Gateway here.
+2. Attach all 50 application VPCs (the Spokes) to the TGW.
+3. In every Spoke VPC, configure the default route `0.0.0.0/0` to point to the TGW attachment.
+4. On the TGW Route Table, configure the default route `0.0.0.0/0` to forward all traffic to the Security VPC attachment.
+5. In the Security VPC, traffic is forced through the Firewall fleet for Deep Packet Inspection. If clean, it passes to the NAT Gateway and out strictly through the Security VPC's single Internet Gateway.
+
+---
+
+**Q27. [L1] Why is the tech industry pushing heavily toward HTTP/3? What fundamental underlying protocol does it change?**
+
+> *What the interviewer is testing:* HTTP generation evolution, QUIC, TCP vs UDP.
+
+**Answer:**
+HTTP/1.1 and HTTP/2 are built on **TCP**. TCP suffers from "Head-of-Line Blocking"—if a single packet is lost, the entire TCP stream pauses to wait for retransmission, heavily penalizing modern webpages that download hundreds of assets concurrently.
+**HTTP/3** discards TCP completely and is built on **QUIC (which runs over UDP)**.
+By using UDP at the transport layer, HTTP/3 handles packet loss and stream multiplexing simultaneously within the application layer. If one image packet drops, the rest of the page continues loading smoothly. It also combines the cryptographic TLS handshake into the initial connection, establishing secure connections significantly faster than TCP.
+
+---
+
+**Q28. [L2] Users inside the corporate office navigate to `wiki.company.com` and hit the fast, private internal server IP `10.0.5.10`. Users working from a coffee shop navigate to `wiki.company.com` and hit the public AWS Load Balancer IP `203.0.113.1`. How is the same domain name returning two completely different IPs without conflict?**
+
+> *What the interviewer is testing:* Split-Horizon DNS (Split-brain DNS).
+
+**Answer:**
+This is achieved via **Split-Horizon DNS**.
+DNS servers are configured to return different answers based on the originating IP address of the requester.
+- **Internal Zone:** The corporate office routers hand out internal DNS servers (like Active Directory DNS or Route 53 Resolver) via DHCP. These servers hold an authoritative internal zone for `company.com` and return `10.0.5.10`.
+- **External Zone:** The rest of the world queries public DNS resolvers, which traverse to the public authoritative nameservers for `company.com` (e.g., Route 53 Public Hosted Zone), which returns the public ALB IP `203.0.113.1`.
+
+---
+
+**Q29. [L3] Your company has a 10 Gbps Direct Connect fiber line from London to Tokyo. However, a single large file transfer using scp/TCP maxes out at only 150 Mbps, despite the link being 99% idle. Why can't TCP fill the pipe, and how do you fix it?**
+
+> *What the interviewer is testing:* TCP Window Scaling, Long Fat Networks (LFN), Bandwidth-Delay Product.
+
+**Answer:**
+This is classic behavior in a **Long Fat Network (LFN)**—high bandwidth, high latency.
+The speed limit is not the bandwidth; it's the **TCP Receive Window**. TCP requires an acknowledgment (ACK) for data sent. If the window size is 64KB, the sender can only put 64KB of data "in flight" on the fiber cable before stopping to wait for the ACK from Tokyo. Because the round-trip time (ping) from London to Tokyo is huge (e.g., 250ms), the sender constantly stops and waits, wasting the 10Gbps pipe.
+**To fix:** I must tune the OS kernel to enable **TCP Window Scaling** (`sysctl net.ipv4.tcp_window_scaling=1`) and massively increase the `rmem` and `wmem` buffer sizes so the sender can put gigabytes of data "in flight" without waiting for instant ACKs. Changing the congestion control algorithm to `BBR` also drastically improves throughput on long links.
+
+---
+
+**Q30. [L2] A purist network engineer argues that with the adoption of IPv6, NAT (Network Address Translation) is dead and should never be used. Why does IPv6 eliminate the need for NAT?**
+
+> *What the interviewer is testing:* IPv4 address exhaustion, RFC 1918, IPv6 global routing.
+
+**Answer:**
+NAT was heavily popularized primarily as a hack to solve **IPv4 Address Exhaustion**. Because there are only ~4 billion IPv4 addresses, we hide thousands of private corporate devices (RFC 1918 space like `10.x.x.x`) behind a single public router IP via NAT.
+**IPv6** provides 340 undecillion addresses. Every grain of sand on Earth could have a unique public IPv6 address. Because there is virtually infinite supply, every server and device can have a globally unique, publicly routable IP address natively. NAT is fundamentally no longer required for address conservation. (Security is handled by strict stateful firewalls dropping inbound traffic, not NAT).
+
+---
+
+**Q31. [L1] What is a VLAN, and what problem does it solve in a physical data center?**
+
+> *What the interviewer is testing:* Layer 2 segmentation, broadcast domains.
+
+**Answer:**
+A **VLAN (Virtual Local Area Network)** allows network engineers to logically segment a single physical switch into multiple isolated virtual switches.
+For example, instead of buying two separate $5,000 switches for the "HR Server Rack" and the "Dev Server Rack," you plug them all into one switch. You assign HR ports to VLAN 10 and Dev ports to VLAN 20. 
+At Layer 2, devices in VLAN 10 cannot see or intercept the broadcast traffic (like ARP requests) of VLAN 20. It effectively creates separate, secure **Broadcast Domains**, reducing network noise and isolating traffic without buying extra hardware.
+
+---
+
+**Q32. [L3] In Kubernetes, what is the architectural difference between a standard LoadBalancer Service and an Ingress Controller?**
+
+> *What the interviewer is testing:* L4 vs L7 routing in K8s, cloud cost optimization.
+
+**Answer:**
+- **Service Type: LoadBalancer (Layer 4):** When you declare this, Kubernetes requests the cloud provider (AWS/GCP) to physically provision a brand new, dedicated Network/Classic Load Balancer. If you have 50 microservices, you get 50 ALBs, and you pay hourly for 50 ALBs. It routes raw IP traffic directly into the pod nodes.
+- **Ingress Controller (Layer 7):** An Ingress Controller (like Nginx-Ingress) is essentially a software reverse proxy deployed *inside* the cluster itself as a Pod. You provision exactly **one** cloud Load Balancer to point all internet traffic to the Ingress pods. The Ingress pod acts as an API Gateway, reading the HTTP URL paths (`/serviceA`, `/serviceB`) and routing the traffic internally to the 50 different backend services. It collapses 50 cloud LBs into 1, massively saving costs and centralizing TLS termination.
+
+---
+
+**Q33. [L2] Your infrastructure team completely migrates a backend database to a new server with a new IP, updating DNS. All modern Go and Python services reconnect fine. However, a legacy Java application continues throwing connection timeouts trying to reach the old, dead IP address forever. Why?**
+
+> *What the interviewer is testing:* Application-layer DNS caching, JVM defaults.
+
+**Answer:**
+This is an issue with the **Java Virtual Machine (JVM) DNS Cache**.
+While OS kernels and Python respect the TTL (Time To Live) provided by the DNS record, older versions of the JVM completely ignore DNS TTL. Specifically, the `networkaddress.cache.ttl` security property is set to `-1` by default in some older Java versions, meaning Java will resolve the database hostname to an IP exactly once upon startup, cache it deeply in RAM, and **never query the DNS server again** for the lifetime of the process.
+To fix it, you either restart the Java application to force a fresh lookup, or proactively change the `networkaddress.cache.ttl` variable in `java.security` to 60 seconds.
+
+---
+
+**Q34. [L1] What is the difference between a Layer 2 Switch and a Layer 3 Router?**
+
+> *What the interviewer is testing:* OSI Model, MAC vs IP.
+
+**Answer:**
+- **Layer 2 Switch:** Operates at the Data Link layer. It moves packets strictly within the *same* local network. It forwards traffic based purely on physical **MAC Addresses**, utilizing an internal MAC address table to know which physical port a specific computer is plugged into.
+- **Layer 3 Router:** Operates at the Network layer. It is responsible for bridging *different* networks together (e.g., connecting a home network to the internet). It routes traffic based on logical **IP Addresses**, using routing tables to determine the best path to send a packet across the globe.
+
+---
+
+**Q35. [L3] Your SaaS company provides a database-as-a-service. A massive banking client wants to securely connect to your database from their AWS VPC. Their strict compliance prohibits traversing the public internet, and prohibits VPC Peering because they refuse to expose their internal routing tables to you. How do you architect the connection?**
+
+> *What the interviewer is testing:* AWS PrivateLink / VPC Endpoint Services, uni-directional security.
+
+**Answer:**
+This is the exact use case for **AWS PrivateLink (VPC Endpoint Services)**.
+1. In your SaaS VPC, you place a Network Load Balancer (NLB) in front of the database and expose it as a VPC Endpoint Service.
+2. The banking client requests to connect to your service. Upon your explicit approval, they create a VPC Interface Endpoint inside their own VPC.
+3. This creates Elastic Network Interfaces (ENIs) natively inside the bank's subnets. 
+The bank's applications communicate with these local ENIs using local private IPs. AWS PrivateLink securely pipes that traffic directly to your SaaS NLB under the hood over the AWS internal backbone.
+**Why it passes audit:** Unlike VPC Peering, PrivateLink is purely **uni-directional**. The bank can initiate requests to you, but it is physically impossible for your SaaS network to initiate a reverse connection back into the bank's internal network to scan or attack them.
+
+---
+
+**Q36. [L2] You see logs indicating that packets arriving from the public internet have a source IP of `10.0.5.50` (a private IP in your own corporate network). What is this attack, and how is it stopped at the network border?**
+
+> *What the interviewer is testing:* IP Spoofing, uRPF (Unicast Reverse Path Forwarding), ingress filtering.
+
+**Answer:**
+This is an **IP Spoofing** attack. The attacker manually alters the IP header of their malicious packet to falsely claim it originated from an internal, trusted IP, hoping your internal network implicitly trusts it and bypasses firewalls.
+This is thwarted using **uRPF (Unicast Reverse Path Forwarding)** globally on border routers (often enforced by ISPs per BCP38), and Strict Ingress Filtering on corporate firewalls.
+The border firewall evaluates the packet: "If I wanted to reply to this source IP `10.0.5.50`, my routing table says it lives on my internal LAN interface. But the packet just physically arrived on my external WAN interface. It's geographically impossible." The router instantly drops it as a spoofed packet.
+
+---
+
+**Q37. [L1] Define what a VPN (Virtual Private Network) is in simple terms, and briefly explain how IPSec secures it.**
+
+> *What the interviewer is testing:* Encryption in transit, encapsulation.
+
+**Answer:**
+A **VPN** is a technology that allows a remote device to establish a secure, encrypted "tunnel" across the dangerous public internet, virtually inserting that device directly into a private corporate network exactly as if it were plugged into a switch in the office.
+**IPSec (Internet Protocol Security)** handles the security at Layer 3:
+1. It uses IKE (Internet Key Exchange) to cryptographically authenticate both sides and agree on encryption keys.
+2. It takes the original internal packet (e.g., destined for `10.0.1.5`), completely encrypts it, and encapsulates it inside an entirely new outer public internet packet. 
+3. The outer packet traverses the internet to the corporate router, which unwraps and decrypts the inner packet and forwards it to the internal destination cleanly.
+
+---
+
+**Q38. [L3] A major ISP accidentally misconfigures a BGP route, announcing to the world that they are the optimal path to reach Google's IP addresses. Suddenly, millions of users' traffic meant for Google is blackholed or severely degraded. What is this phenomenon called?**
+
+> *What the interviewer is testing:* BGP Route Leaks, internet fragility.
+
+**Answer:**
+This is called a **BGP Route Leak** (or BGP Hijacking, if malicious).
+Because the Border Gateway Protocol (BGP) was designed in an era of mutual trust, when the ISP incorrectly advertises a more specific prefix or a shorter path to Google's IPs, neighboring global routers dynamically update their tables and redirect traffic toward that ISP. 
+If the ISP isn't actually Google, the traffic hits their edge and is dropped (blackholed), or it artificially bottlenecks their infrastructure causing massive outages. Modern networks mitigate this using RPKI (cryptographic route validation) and strict route filtering, refusing to accept Google announcements from untrusted Tier-3 ISPs.
+
+---
+
+**Q39. [L2] In a corporate network, an attacker executes a malicious script that generates millions of random fake MAC addresses and rapidly fills up the network switch's CAM table (MAC address table). What happens to the switch, and what security risk does this open?**
+
+> *What the interviewer is testing:* MAC Flooding, fail-open behavior of switches.
+
+**Answer:**
+This is a **MAC Flooding** attack.
+A switch has a limited amount of memory to map MAC addresses to physical ports. When the attacker's script completely exhausts this memory, the switch can no longer remember where legitimate devices are plugged in.
+When a switch doesn't know where to send a packet, its default fail-safe protocol is to **"fail-open" and act like a Hub**. It broadcasts every single incoming packet out of *every single port* on the switch. 
+The security risk is catastrophic: the attacker can now run a packet sniffer (like Wireshark) on their laptop and passively see all horizontal traffic intended for other computers, intercepting plaintext passwords and sessions. (Mitigated by configuring Switch Port Security algorithms limiting MACs per physical port).
+
+---
+
+**Q40. [L1] When a server wants to send data to an IP address, how does it decide whether to send it directly to the local network or send it to its Default Gateway?**
+
+> *What the interviewer is testing:* Subnet masks, broadcast domains, routing tables.
+
+**Answer:**
+The server makes the decision using the **Subnet Mask**.
+When it wants to talk to a destination IP, it mathematically performs a bitwise AND operation using its own IP, the destination IP, and the subnet mask.
+- If the calculation results in the same network prefix, the server knows the destination is on its local LAN. It sends an ARP request to get the destination's MAC address and talks to it directly across the switch.
+- If the network prefixes do not match, the server knows the destination is on a remote, foreign network. It immediately sends the packet to its **Default Gateway** (the router's MAC address), relying on the router to navigate the wider internet.

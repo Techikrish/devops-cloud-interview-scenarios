@@ -188,4 +188,242 @@ In K8s: `securityContext.capabilities.drop: ["ALL"]`, then `add: ["NET_BIND_SERV
 
 ---
 
+**Q61. [L2] A junior developer complains that every time they edit a file on their host machine, the changes don't physically appear inside the Docker container despite having a bind mount configured. What is the most likely culprit?**
+
+> *What the interviewer is testing:* Inode changing from text editors, bind mount mechanics.
+
+**Answer:**
+If they bind-mounted a *single file* (e.g., `-v /path/to/app.py:/app/app.py`) instead of a directory, the issue is how modern text editors (like Vim or some IDEs) save files.
+When you save a file in Vim, it often creates a temporary file, deletes the original file, and renames the temp file to the original name. This completely changes the file's **inode**.
+Docker bind-mounts are explicitly tied to the inode present at the exact moment the container started. Because the host editor created a new inode, the container continues looking at the old (now deleted/hidden) inode and misses the updates.
+*Fix:* Bind-mount the *entire directory* (e.g., `-v /path/to:/app`) rather than the individual file. The directory's inode doesn't change when files inside it are updated.
+
+---
+
+**Q62. [L3] You set up a strict UFW (Uncomplicated Firewall) on your Ubuntu server to block all incoming traffic to port 8080. You then run a Docker container `docker run -p 8080:80 myapp`. Miraculously, a hacker easily accesses your app on port 8080 from the internet. Why did the firewall fail?**
+
+> *What the interviewer is testing:* Docker networking vs. Host iptables/UFW integration.
+
+**Answer:**
+Docker bypasses UFW by design.
+When Docker starts, it actively manipulates the Linux `iptables` directly by inserting its own rules at the absolute top of the `PREROUTING` chain in the `nat` table (in a chain called `DOCKER`).
+Because UFW operates primarily in the `INPUT` chain, the traffic hitting port 8080 is intercepted by Docker's `PREROUTING` rule *before* UFW ever sees it, and routed directly into the container.
+*Fix:* Never rely on host OS firewalls to protect exposed Docker ports. You must either not publish the port `8080` to the internet (bind it to localhost `-p 127.0.0.1:8080:80`), or modify the Docker daemon configuration to set `"iptables": false` (which breaks many standard Docker networking features).
+
+---
+
+**Q63. [L1] A container exits with code `137`. What does this specific code universally mean in the Docker ecosystem, and where should you look next?**
+
+> *What the interviewer is testing:* Exit code evaluation, OOM killer.
+
+**Answer:**
+Exit code `137` specifically means the container received a `SIGKILL` (signal 9) and was abruptly terminated ($128 + 9 = 137$).
+In 90% of Docker/Kubernetes scenarios, this means the container was violently killed by the **OOM (Out Of Memory) Killer** because it exceeded its allocated memory limits.
+*Next Steps:* I would immediately run `docker inspect <container_id>` and check the `State.OOMKilled` boolean flag to confirm. Then, I would review application memory profiling and potentially increase the `-m` (memory limit) on the container runtime.
+
+---
+
+**Q64. [L3] You are tasked with debugging a critically failing production container. However, the container is built "Distroless" (it has absolutely no shell, no `bash`, no `ls`, no `curl`). `docker exec` fails with "executable file not found in $PATH". How do you run debugging tools against this container?**
+
+> *What the interviewer is testing:* Namespaces, `nsenter`, ephemeral debug containers.
+
+**Answer:**
+You cannot `exec` a shell if the shell binary literally doesn't exist inside the container. You must inject tools from the outside using Linux namespaces.
+1. **Find the PID:** Run `docker inspect --format '{{.State.Pid}}' <container_id>`. (e.g., PID 1234).
+2. **Use nsenter:** As a root user on the host, use `nsenter` to run a host shell *inside* the network, mount, and PID namespaces of the container:
+   `sudo nsenter -t 1234 -n -p -m /bin/bash`
+   This gives you full host tools running under the exact perspective of the distroless container.
+3. **Alternative (K8s):** Use Ephemeral Containers (`kubectl debug`), which attach a sidecar (like an Alpine/Ubuntu image) sharing the exact same network namespace.
+
+---
+
+**Q65. [L2] A Python data science container parsing massive multi-gigabyte pandas dataframes suddenly crashes randomly. The code is flawless, the server has 128GB of RAM, and OOMKilled is false. You notice the crash happens specifically when multiprocessing writes heavily. What hidden Docker limit is causing this?**
+
+> *What the interviewer is testing:* Shared memory (`shm_size`) limits.
+
+**Answer:**
+The container is exhausting its **Shared Memory (`/dev/shm`) limit**.
+By default, Docker allocates an incredibly tiny `64MB` to `/dev/shm` for every container. Python multiprocessing, Postgres databases, and tools like Google Chrome Heavily utilize shared memory to pass data quickly between worker processes.
+When they try to write a 1GB dataframe into the 64MB shared memory space, they immediately crash with obscure "Bus error" or memory exceptions.
+*Fix:* Run the container with an explicitly increased shared memory limit: `docker run --shm-size="2g" myapp`.
+
+---
+
+**Q66. [L1] A developer submits a Dockerfile that copies a 5GB file, runs a command to compress it to 100MB, and then runs `rm` to delete the original 5GB file in the next step. Why does the final Docker image still weigh over 5GB?**
+
+> *What the interviewer is testing:* Intersecting image layers natively, Copy-on-Write storage.
+
+**Answer:**
+Dockerfile instructions like `COPY`, `RUN`, and `ADD` create immutable, read-only layers.
+When the developer copied the 5GB file in Layer 1, it was permanently baked into the image history. When they deleted it in Layer 3 using a subsequent `RUN rm` command, Docker merely created a new layer with a "whiteout" marker hiding the file. The original 5GB file still exists underneath and is physically downloaded by anyone pulling the image.
+*Fix:* Operations that download, process, and delete temporary files must be chained together within a single `RUN` instruction using `&&`:
+`RUN wget massive.tar && compress massive.tar && rm massive.tar`
+
+---
+
+**Q67. [L3] Your company is migrating stateful MySQL databases to Docker. A consultant advises using "Bind Mounts". You disagree and advocate strongly for completely bypassing the Docker Storage Driver entirely by utilizing raw Block Devices. Why?**
+
+> *What the interviewer is testing:* Storage drivers under heavy I/O workloads.
+
+**Answer:**
+Using standard Docker Storage Drivers (like overlay2) or traversing file-system boundaries for massive, high-IOPS write-heavy database workloads introduces significant systemic overhead. 
+While named volumes heavily bypass the UnionFS, for extreme enterprise database performance (bare-metal equivalence), you should allocate a raw LUN or dedicated partition (e.g., `/dev/sdb`) and map it directly into the container using the `--device` flag, allowing the database engine inside the container to interact directly with the kernel's block layer natively, completely eliminating Docker's storage abstraction penalties.
+
+---
+
+**Q68. [L2] You execute `docker run -d myapp`. The terminal returns a long container ID, but immediately upon checking `docker ps`, the container is completely missing. `docker ps -a` shows it exited with code 0. Why did it immediately stop if it didn't error?**
+
+> *What the interviewer is testing:* Daemonizing background processes inside containers.
+
+**Answer:**
+A Docker container strictly lives only as long as its primary PID 1 process is running.
+If the `CMD` or `ENTRYPOINT` in the Dockerfile starts an application in the background (e.g., executing `service nginx start` or appending an `&` to a script), the script will start the daemon, successfully finish its execution, and return an exit code of `0`. 
+Because the foreground script finished, PID 1 terminates, and Docker shuts down the container, killing everything inside it.
+*Fix:* You must run the main process in the foreground. Use `nginx -g 'daemon off;'` or execute the application binary explicitly without backgrounding it.
+
+---
+
+**Q69. [L1] What happens if your CI pipeline repeatedly builds the exact same Dockerfile using the `latest` tag and pushes it to an AWS ECR registry every day for a year?**
+
+> *What the interviewer is testing:* Tag mutability, dangling references, registry bloat.
+
+**Answer:**
+Using the `latest` tag makes it a **mutable tag**. 
+Every time the CI pipeline pushes, AWS ECR will overwrite the `latest` tag to point to the brand new image manifest. The older images from previous days will lose their tag and become **Untagged** (Dangling) images in the registry. 
+If no Lifecycle Policy is configured to garbage-collect untagged images, you will accumulate 365 orphaned 1GB images, paying AWS for useless storage bloat. (Also, deploying `latest` in Kubernetes is dangerous as it breaks rollback determinism). Always use Git SHAs or Semantic Versioning tags.
+
+---
+
+**Q70. [L3] You want to pass a highly sensitive API key to a running container. You know not to bake it into the image, so you pass it as an environment variable (`docker run -e SECRET=apikey`). Why is this still arguably a security vulnerability, and what is the better approach?**
+
+> *What the interviewer is testing:* Secret exposure via `docker inspect` and `procfs`.
+
+**Answer:**
+Passing secrets via Environment Variables (`-e`) is insecure because:
+1. Anyone with access to run `docker inspect <container>` on the host will see the secret in plaintext in the JSON output.
+2. If the application crashes, the environment variables are often heavily dumped into the error trace logs.
+3. The variables are exposed physically in the kernel via `/proc/<PID>/environ`, accessible by any other running process grouped with the same owner.
+*Better Approach:* Use Docker Secrets (if in Swarm) or K8s Secrets, which act as a temporary RAM-disk `tmpfs` layer. The secret is securely mounted as a file (e.g., `/run/secrets/apikey`). The application securely reads the file string into memory once, preventing it from appearing in standard diagnostic dumps.
+
+---
+
+**Q71. [L2] A heavily loaded Nginx container starts rejecting connections citing "Too many open files". You check the host Linux server, and its `ulimit -n` is set to 1,000,000. Why is the container still failing?**
+
+> *What the interviewer is testing:* Container-specific ulimit enforcement.
+
+**Answer:**
+Containers do not automatically inherit the `ulimit` settings from the user space of the host operating system. The Docker daemon manages its own default limits for containers (often the conservative 1024 or 4096 standard).
+To resolve this, you must explicitly pass the ulimits during the container instantiation:
+`docker run --ulimit nofile=65536:65536 mynginx`
+Alternatively, you can globally alter the defaults overriding the Docker daemon configuration (`/etc/docker/daemon.json`) so all new containers inherit a more production-ready baseline.
+
+---
+
+**Q72. [L1] You are investigating an incident. How do you find the exact time a container was created, started, and stopped down to the millisecond?**
+
+> *What the interviewer is testing:* `docker inspect` parsing.
+
+**Answer:**
+You would use the `docker inspect` command to query the detailed metadata json.
+You can parse it cleanly using the go-template format flag:
+`docker inspect --format='{{.State.StartedAt}} :: {{.State.FinishedAt}}' <container_id>`. This bypasses manually scrolling through massive JSON outputs.
+
+---
+
+**Q73. [L3] Your CI/CD builds for a massive Go monorepo are taking 20 minutes because every minor code change invalidates the `RUN go mod download` layer, forcing a re-download of gigabytes of packages. How do you optimize the Dockerfile to utilize BuildKit cache mounts and permanently speed this up?**
+
+> *What the interviewer is testing:* Advanced BuildKit features, `--mount=type=cache`.
+
+**Answer:**
+You need to use a BuildKit persistent cache mount for the dependency directory. This allows the compiler to share an explicit cache folder across completely different consecutive pipeline builds, independently of the image layer cache.
+```dockerfile
+# Must enable BuildKit
+COPY go.mod go.sum .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go build -o app
+```
+Even if `go.mod` is bumped and the layer invalidates, the persistent cache mount still contains 99% of the previously downloaded packages on disk, reducing the 20-minute download to seconds.
+
+---
+
+**Q74. [L2] A developer executes a `docker run --rm -v /home/user/code:/app mynode` to run a script containing `npm install`. When the container finishes, the developer finds that all the new node_modules files placed in their `/home/user/code` folder are owned by `root`. Why, and how do you prevent this?**
+
+> *What the interviewer is testing:* UID/GID matching across namespaces, volume permission issues.
+
+**Answer:**
+By default, processes inside the container execute as the `root` user (UID 0). 
+When those processes write to a bind-mounted directory, they use UID 0 on the host filesystem. Even if you are a regular user on the host, the files are created strictly by root.
+*Fix:* You must tightly align the executing user. Run the container explicitly with your current UID/GID by passing the `--user` flag:
+`docker run --rm --user $(id -u):$(id -g) -v $(pwd):/app mynode npm install`
+The files will then be generated with the exact identical UID/GID mapping back to the host developer.
+
+---
+
+**Q75. [L1] What happens if you run out of IPs in a Docker bridge network? How many IPs does the default Docker bridge give you by default?**
+
+> *What the interviewer is testing:* `docker0` bridge /16 defaults.
+
+**Answer:**
+The default `docker0` bridge network utilizes the `172.17.0.0/16` subnet, which provides approximately 65,534 IP addresses. 
+If you miraculously exhaust this or configure a custom network with a smaller `/24` subnet and exhaust it, Docker will vehemently fail to start any new containers on that network, citing an IP Address Allocation error in the daemon logs. You would have to aggressively prune dead containers or recreate the network heavily utilizing a larger CIDR block.
+
+---
+
+**Q76. [L3] You deploy a cluster of 50 identical microservices. To ensure zero drifts, they all pull a massive 1GB initial configuration file from a central S3 bucket immediately upon booting via the `CMD` script. Why is this an anti-pattern in container architecture, and what is the immutable alternative?**
+
+> *What the interviewer is testing:* Immutable infrastructure, startup performance, config-maps.
+
+**Answer:**
+This brutally violates the principle of **Immutable Infrastructure** and destroys startup agility.
+If the S3 bucket goes down, your containers cannot boot. If you deploy 50 pods simultaneously, you abruptly trigger a 50GB spike of completely duplicate network traffic, severely delaying readiness.
+*Alternative:* Small, rapidly changing configurations should be mounted externally at runtime via **Kubernetes ConfigMaps** or Docker Swarm Configs (which use fast local tmpfs). If the 1GB file is structurally static (like a machine learning model), it must be baked directly into the Docker image tightly during the CI/CD build phase. The image then acts as an immutable, instant-booting artifact universally across environments.
+
+---
+
+**Q77. [L2] What is a "Dangling Volume", and how does it happen?**
+
+> *What the interviewer is testing:* Data persistence lifecycle.
+
+**Answer:**
+A **Dangling Volume** is an orphaned Docker volume that is no longer attached to any active or stopped container.
+It often happens when you delete a container with `docker rm <container>` but fail to include the `-v` flag, which instructs Docker to seamlessly delete associated anonymous volumes. Alternatively, scaling down a stateful set explicitly orphans explicitly named volumes.
+Because Docker fundamentally prioritizes data safety, it never deletes volumes aggressively automatically. You must run `docker volume prune` manually to securely flush dangling volumes and recover disk space.
+
+---
+
+**Q78. [L1] Are Docker containers fundamentally "virtual machines"? Defend your answer.**
+
+> *What the interviewer is testing:* Core virtualization vs containerization paradigms.
+
+**Answer:**
+No, Docker containers natively are **not** Virtual Machines.
+A VM relies on a heavily hardware-level Hypervisor (like VMware or KVM) to run an entirely distinct, massive Guest Operating System (with its own kernel) for every application. 
+A Docker container uses OS-level virtualization. It tightly shares the exact single underlying Host OS kernel with other containers. It isolates processes locally using Linux features like `Namespaces` (for isolating visibility of network/PIDs) and `Cgroups` (for capping CPU/Memory limits). Containers are vastly lighter because they don't load a 1GB kernel to simply run a 50MB Python app.
+
+---
+
+**Q79. [L3] You've developed an internal tool specifically for your SRE team using Python. Due to compliance, you must heavily sign all your Docker images cryptographically to prove they originated exclusively from your exact CI/CD server before production will run them. What Docker technology enforces this?**
+
+> *What the interviewer is testing:* Docker Trust, Notary, sigstore/cosign.
+
+**Answer:**
+This is historically managed by **Docker Content Trust (DCT)**, effectively backed by the Notary service. By enabling `export DOCKER_CONTENT_TRUST=1`, the Docker client cryptographically signs the image manifest using private keys before pushing. Production nodes strictly configured with DCT enabled will adamantly refuse to pull or run images missing signatures from trusted cryptographic publishers.
+Modern approaches strongly lean towards utilizing **Sigstore/Cosign**, which enables keyless signing tied to strict OIDC identities (like GitHub Actions workflows) to sign images seamlessly and generate indisputable transparency logs.
+
+---
+
+**Q80. [L2] A junior engineer asks why they can't effectively run a Windows `.exe` binary inside a standardized Ubuntu Docker container running natively on a Windows 10 host using Docker Desktop. Explain the architecture constraint.**
+
+> *What the interviewer is testing:* Environment isolation, Kernel dependencies vs. Host OS functionality.
+
+**Answer:**
+Docker Desktop on Windows heavily masks the truth. To run Linux containers, it actually boots a hidden Linux VM deeply in the background (via WSL2 or Hyper-V). The standard "Ubuntu" container runs atop that actual Linux kernel.
+You cannot run a Windows `.exe` heavily inside a Linux container because the `.exe` file format fundamentally requires Windows APIs, Windows DLLs, and a native Windows NT kernel. Containers only bundle user-space libraries; they *strictly share* the actively running bare-metal kernel. To run a `.exe` in a container, you must use **Windows Server Containers**, which use a native Windows kernel and natively wrap the `.exe` perfectly. You cannot cross-pollinate kernels.
+
+---
+
 *More Docker scenarios added periodically. PRs welcome.*

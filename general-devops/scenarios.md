@@ -261,3 +261,230 @@ resource "aws_db_instance" "production" {
 }
 ```
 If a developer deletes this block or attempts to run `terraform destroy`, Terraform will parse the state file, observe the `prevent_destroy` metadata still attached to that resource, and flat-out refuse to execute the plan, throwing an error and saving the database.
+
+---
+
+**Q21. [L2] You have hundreds of AWS Lambda functions connecting to a traditional PostgreSQL database. Under heavy load, the database crashes with "Too many connections" before the Lambdas finish executing. How do you fix this?**
+
+> *What the interviewer is testing:* Serverless connection limits, database connection pooling, Amazon RDS Proxy.
+
+**Answer:**
+Serverless functions (like AWS Lambda) scale highly concurrently. If 5,000 requests come in, 5,000 ephemeral Lambda containers spin up, and *each one* attempts to open a separate, direct TCP connection to the PostgreSQL database. Traditional databases are designed to handle a few hundred persistent connections, not thousands of short-lived ones, leading to connection exhaustion and failure.
+To fix this, you must introduce a **Connection Pooler** between the Lambdas and the Database. 
+In AWS, the best managed solution is **Amazon RDS Proxy**. The Lambdas connect to the RDS Proxy, and the proxy multiplexes those thousands of requests over a small, stable pool of persistent connections to the database, protecting it from being overwhelmed.
+
+---
+
+**Q22. [L1] What is the "Circuit Breaker" pattern and why is it essential in a microservices architecture?**
+
+> *What the interviewer is testing:* Resilience patterns, cascading failures.
+
+**Answer:**
+In microservices, Service A often calls Service B. If Service B becomes unresponsive, Service A will continuously wait for timeouts, backing up its own queues and exhausting its threads until Service A also crashes. This causes a "cascading failure" across the entire system.
+The **Circuit Breaker pattern** prevents this. If Service B fails a certain number of times in a row, Service A's circuit breaker "trips" (opens). Service A stops trying to call Service B entirely, instantly returning a fallback response or an error, protecting its own resources. It periodically sends a test request (half-open state) and if Service B is healthy again, the circuit closes and normal traffic resumes.
+
+---
+
+**Q23. [L3] A developer wants to perform a breaking schema change in a live production database (e.g., renaming a heavily used column or splitting a table) with zero downtime. Walk through the steps to achieve this safely.**
+
+> *What the interviewer is testing:* Zero-downtime database migrations, Expand/Contract pattern.
+
+**Answer:**
+You cannot simply run an `ALTER TABLE RENAME` command, as the live application will instantly crash when it queries the old name. The solution is the **Expand and Contract pattern**:
+1. **Expand (Database):** Add the *new* column alongside the old one. Do not delete the old one.
+2. **Expand (Code - Write both):** Deploy a new version of the application that writes data to *both* the old and the new columns but still reads from the old one.
+3. **Backfill:** Run a background script to migrate existing data from the old column to the new column.
+4. **Transition (Code - Read new):** Deploy a new version of the application that reads from the *new* column instead of the old one.
+5. **Contract (Code - Stop writes):** Deploy a version that stops writing to the old column completely.
+6. **Contract (Database):** Finally, safely drop the old column from the database.
+
+---
+
+**Q24. [L1] What are Feature Flags (Feature Toggles), and what operational risks do they introduce if not managed properly?**
+
+> *What the interviewer is testing:* Decoupling deployment from release, technical debt management.
+
+**Answer:**
+**Feature Flags** allow developers to merge code to production but keep the feature hidden or disabled via a configuration toggle. This decouples the deployment of code from the business release of a feature and allows for safe canary rollouts (e.g., enable for 5% of users).
+**Operational Risk:** The main risk is **Flag Debt**. Over time, if old flags are not pruned, the codebase slowly turns into a labyrinth of fragmented `if/else` logic. This dramatically increases testing complexity (every flag doubles the number of possible system states). Forgotten flags accidentally flipped back on years later can cause catastrophic data corruption or bring down the application.
+
+---
+
+**Q25. [L2] A critical infrastructure configuration was manually modified via the AWS Console at 3 AM to fix an outage (Configuration Drift). The next morning, a CI pipeline runs `terraform apply` for an unrelated change. What happens and how do you reconcile this?**
+
+> *What the interviewer is testing:* Infrastructure as Code drift, declarative state reconciliation.
+
+**Answer:**
+Because Terraform is declarative, it compares the desired state (the code) with the actual state (the AWS environment). When `terraform apply` runs, it will detect the 3 AM manual CLI/Console change, mark it as drift, and **destroy the manual fix** to revert the infrastructure back to exactly what is defined in the `.tf` files.
+**To reconcile this:** The manual change must be codified *before* anyone runs apply. A developer needs to write the equivalent Terraform code matching the manual 3 AM fix, run `terraform plan` to ensure zero changes are pending (meaning the code now perfectly matches reality), and then merge that code to `main`. 
+
+---
+
+**Q26. [L2] Your microservices application depends on a third-party payment gateway API. The third-party API goes down, and suddenly your own internal services start crashing. How do you isolate your system from external failures?**
+
+> *What the interviewer is testing:* Fault isolation, timeouts, bulkheads.
+
+**Answer:**
+When an external API goes down, internal threads typically block while waiting for TCP timeouts. This quickly exhausts internal connection pools.
+To isolate the system:
+1. **Aggressive Timeouts:** Set strict, short timeouts on all external network calls instead of relying on OS defaults (which can be 30-120 seconds). 
+2. **Circuit Breakers:** Implement circuit breakers to stop calling the third-party API entirely once failure thresholds are reached.
+3. **Asynchronous Processing:** If possible, decouple the payment from the user flow. Have the user checkout place an event in an AWS SQS queue, and have a worker attempt the third-party API call independently, retrying it with backoff when the API recovers.
+
+---
+
+**Q27. [L3] Your team is moving from traditional CI/CD (push-based) to GitOps (pull-based, e.g., ArgoCD / Flux). What are the fundamental security and operational differences between these two approaches regarding cluster access?**
+
+> *What the interviewer is testing:* GitOps architecture, inside-out vs outside-in security models.
+
+**Answer:**
+In **Traditional CI/CD (Push)**, the CI runner (like Jenkins or GitHub Actions) lives outside the Kubernetes cluster. To deploy, the CI runner must be granted highly privileged API credentials to reach *into* the cluster and push changes. If Jenkins is compromised, the attacker has god-mode access to the production cluster.
+In **GitOps (Pull)**, an operator (like ArgoCD) runs *inside* the cluster itself. It proactively monitors a Git repository for changes and pulls them in, applying them locally. 
+**Security Difference:** The cluster never exposes its API credentials to the outside world. The Git repository becomes the single source of truth, and if CI is compromised, attackers can only push code, not execute direct cluster commands, significantly reducing the blast radius.
+
+---
+
+**Q28. [L1] What is "Chaos Engineering", and why do SRE teams intentionally break things in production?**
+
+> *What the interviewer is testing:* Reliability engineering, Game Days, testing resilience in reality.
+
+**Answer:**
+**Chaos Engineering** is the practice of systematically injecting controlled failures (like terminating instances, simulating packet loss, or degrading database response times) into a system to test its resilience.
+SRE teams do this because complex distributed systems have hidden dependencies and unproven failover mechanisms. Instead of waiting for a 3 AM disaster to find out if the Auto Scaling Group or Circuit Breaker actually works, they intentionally trigger the failure during normal business hours ("Game Days") when the whole team is awake and watching, proactively uncovering and fixing architectural weaknesses.
+
+---
+
+**Q29. [L2] Developers complain that the shared staging environment is constantly broken because different teams deploy conflicting changes. How can you provide them with isolated testing environments without doubling your AWS bill?**
+
+> *What the interviewer is testing:* Ephemeral environments, Kubernetes namespaces, IaC repeatability.
+
+**Answer:**
+The solution is implementing **Ephemeral Environments** (Preview Environments).
+Instead of a single, static "Staging" cluster, the CI/CD pipeline dynamically creates a lightweight, fully functional version of the application for *every single Pull Request*.
+To manage costs:
+- Use Kubernetes Namespaces or logical isolation instead of spinning up full new EC2 clusters.
+- Automatically strip down the resources (e.g., using small DB instances instead of multi-AZ clusters).
+- Introduce a strict TTL (Time-To-Live) where the pipeline automatically destroys the ephemeral environment the moment the PR is merged or closed, or overnight when inactive.
+
+---
+
+**Q30. [L3] You run a global e-commerce site. Most traffic is read-heavy (viewing products). Users complain the site is slow in Asia while your servers are in US-East. How do architecturally drastically reduce latency for read operations globally?**
+
+> *What the interviewer is testing:* CDNs, Edge caching, Read Replicas, Global databases.
+
+**Answer:**
+For read-heavy global traffic, you must push the data as close to the user as possible (Edge).
+1. **Content Delivery Network (CDN):** Serve all static assets (images, CSS, JS) and highly cacheable API responses (like the product catalog JSON) from a CDN (Cloudflare / AWS CloudFront) edge node physically located in Asia.
+2. **Cross-Region Read Replicas:** For dynamic data that cannot be purely CDN-cached, deploy async Read Replicas of your database in an Asian region (e.g., AWS RDS Cross-Region Replica). Route the Asian API servers to read from this local DB replica.
+3. **Edge Compute:** Execute lightweight routing logic or JWT validation using edge functions (Lambda@Edge or Cloudflare Workers) directly at the PoP to avoid the round-trip to US-East entirely.
+
+---
+
+**Q31. [L1] Explain the concept of "Eventual Consistency" in distributed systems.**
+
+> *What the interviewer is testing:* CAP Theorem, distributed databases, replication lag.
+
+**Answer:**
+In distributed architectures (where data is replicated across multiple servers or regions for high availability), it takes time for a write on Node A to propagate to Node B. 
+**Eventual Consistency** means that if you update a record and immediately try to read it back from a different replica, you might get the old data for a few milliseconds (or seconds). However, the system guarantees that absent of any further updates, eventually all replicas will synchronize, and all readers will see the latest correct value. It is a tradeoff sacrificing immediate strict consistency in exchange for massive scalability and uptime.
+
+---
+
+**Q32. [L2] A stateless web application runs on Kubernetes. During a deployment of a new image, users report intermittent HTTP 502 Bad Gateway errors for a few seconds. What is missing in the Pod configuration?**
+
+> *What the interviewer is testing:* Readiness probes, graceful shutdown, zero-downtime deployments.
+
+**Answer:**
+Two crucial things are likely missing or misconfigured:
+1. **Readiness Probes:** The new container starts, and Kubernetes instantly sends traffic to it before the internal application framework (like Spring Boot or Node.js) has fully initialized its HTTP listeners. A `readinessProbe` ensures the Service doesn't route traffic to the Pod until a specific path (e.g., `/health`) returns HTTP 200.
+2. **Graceful Shutdown (SIGTERM handling):** When the old Pod is deleted, Kubernetes sends a SIGTERM. If the application exits instantly, any requests currently in flight are abruptly dropped (HTTP 502). The application must catch the SIGTERM, stop accepting new connections, finish processing in-flight requests, and gracefully exit.
+
+---
+
+**Q33. [L3] Your auto-scaling group scales out based purely on CPU utilization crossing 80%. An intensive marketing email blast goes out at exactly 9:00 AM, causing traffic to spike 10x instantly. The servers crash before new instances can boot. How do you handle this?**
+
+> *What the interviewer is testing:* Reactive vs Proactive scaling, predictive scaling, scheduled actions.
+
+**Answer:**
+Threshold-based CPU scaling is **Reactive**. By the time CPU hits 80%, the application is already stressed. Booting EC2 instances takes minutes—by the time they are ready, the initial servers have already collapsed under the instant 10x spike.
+To handle known traffic spikes, you must use **Proactive Scaling**:
+1. **Scheduled Scaling:** Apply an ASG Scheduled Action to artificially inflate the minimum capacity from 2 to 20 instances at 8:45 AM, giving them 15 minutes to comfortably boot and register before the 9:00 AM blast.
+2. **Predictive Scaling:** Use AWS Predictive Scaling, which uses Machine Learning to analyze historical daily/weekly traffic patterns and pre-warms capacity automatically before anticipated spikes occur.
+
+---
+
+**Q34. [L1] What is an API Gateway, and how does it differ from a standard Load Balancer?**
+
+> *What the interviewer is testing:* OSI Layer 7 routing, API management, authentication offloading.
+
+**Answer:**
+A standard Load Balancer (like a Network Load Balancer) primarily operates at Layer 4, simply forwarding raw TCP packets to backend IPs.
+An **API Gateway** operates at Layer 7 and is specifically designed to manage API logic. While it performs load balancing, its primary job is routing HTTP requests based on URL paths (`/users` goes to Service A, `/billing` to Service B), handling rate limiting, request validation, payload transformation, and acting as a centralized authentication layer (e.g., verifying JWT tokens) before traffic ever reaches the backend microservices.
+
+---
+
+**Q35. [L2] You have a multi-tenant SaaS application where each client's data must be cryptographically isolated. How do you inject and manage hundreds of different database credentials dynamically without hardcoding them in config files?**
+
+> *What the interviewer is testing:* Secrets management at scale, Vault dynamic secrets.
+
+**Answer:**
+Hardcoding hundreds of secrets in environment variables or configuration files is insecure and unmanageable at scale. 
+The best practice is using a **Secrets Management Engine** like HashiCorp Vault.
+Instead of storing static passwords, you use Vault's **Dynamic Secrets Engine**. When the application needs to query Client A's database, it authenticates to Vault using its IAM or Kubernetes identity. Vault instantly generates a short-lived, temporary set of database credentials exclusively for Client A, hands them to the application, and automatically revokes them in the database after a set TTL (e.g., 1 hour). This eliminates the risk of long-lived leaked credentials entirely.
+
+---
+
+**Q36. [L2] A memory leak in a Java Spring Boot application causes the JVM memory to grow indefinitely over several days until it crashes. While the developers investigate the root cause, what immediate SRE mitigation can you apply to keep the service stable for users?**
+
+> *What the interviewer is testing:* Remediation strategies, automated restarts, liveness probes.
+
+**Answer:**
+While fixing the root cause is the developer's job, SREs must preserve uptime. If we know the leak takes roughly 48 hours to crash the process, a safe, immediate mitigation is to enforce **automated recycling** before the threshold is reached.
+In Kubernetes, you would configure a strict memory `limit` combined with a **Liveness Probe**. If the process locks up, the liveness probe fails, and the Kubelet aggressively restarts the Pod, yielding a fresh, empty JVM. 
+Alternatively, use cron or orchestration to gently drain and recycle the instances every 24 hours during low-traffic periods, completely preventing the runaway limit from being hit while developers buy time to fix the code.
+
+---
+
+**Q37. [L3] You are tasked with migrating a massive legacy application from on-premises to the cloud. You cannot afford to refactor the code (Cloud Native). Describe the "Lift and Shift" (Rehosting) approach and its major operational downsides.**
+
+> *What the interviewer is testing:* Cloud migration patterns, operational trade-offs, technical debt.
+
+**Answer:**
+**Lift and Shift (Rehosting)** means cloning the physical/virtual machines byte-for-byte directly into identical cloud VMs (like AWS EC2) with zero architectural changes to the application itself.
+**Major Operational Downsides:** 
+Because the app is not "Cloud Native", you inherit all on-premise technical debt at cloud prices.
+1. **Cost:** Legacy apps typically expect vertical scaling (massive servers) running 24/7. You miss out on the cost savings of auto-scaling, pausing idle resources, or using cheap serverless compute.
+2. **Resilience:** The app likely expects persistent, permanent local disks and fixed IP addresses, making it fragile if the underlying EC2 instance is randomly terminated by the cloud provider. It physically cannot utilize cloud-native elasticity.
+
+---
+
+**Q38. [L1] What is "Shift-Left" in the context of DevSecOps?**
+
+> *What the interviewer is testing:* Software development lifecycle, proactive vs reactive security.
+
+**Answer:**
+Traditionally, security and compliance testing happened "to the right" of the pipeline—just before or after code was deployed to production. If an issue was found, it derailed the release and required expensive architectural rewrites.
+**Shift-Left** means moving these checks as early in the development lifecycle as possible. This includes running static application security testing (SAST), dependency vulnerability scans, and Infrastructure as Code linting directly in the IDE, as pre-commit hooks, or in the very first step of the CI pipeline, allowing developers to catch and fix vulnerabilities within minutes rather than weeks.
+
+---
+
+**Q39. [L2] A developer accidentally commits an AWS Secret Access Key directly into a public GitHub repository. What steps must you immediately orchestrate?**
+
+> *What the interviewer is testing:* Security incident response, credential compromise, git history vs git deletion.
+
+**Answer:**
+Committing a key to a public repo means bots have already scraped it within seconds.
+1. **Invalidate Everything:** The absolute first step is *not* modifying git; it is going straight to AWS IAM and aggressively rotating/deleting that specific Access Key so it immediately becomes inert.
+2. **Audit Breach:** Check CloudTrail logs for that specific IAM user over the last few hours to confirm if the key was actually exploited (e.g., to spin up crypto miners) and assess the scope of the blast radius.
+3. **Clean History (Optional but recommended):** Do not just do a `git revert`, because the secret remains in the commit history. You must use tools like `git filter-repo` or BFG Repo-Cleaner to permanently scrub the secret from the entire commit history, securely regenerate the repository, and force push.
+
+---
+
+**Q40. [L2] You want to migrate a monolithic backend to microservices. The frontend team complains that they will now have to make 15 separate API calls to 15 different microservices just to load the user profile page. How do you solve this architectural bottleneck?**
+
+> *What the interviewer is testing:* Backend-For-Frontend (BFF) pattern, GraphQL, API aggregation.
+
+**Answer:**
+Forcing the client browser or mobile app to manage complex network orchestration, aggregations, and individual microservice latencies creates a horrible user experience.
+The solution is to insert a **Backend-For-Frontend (BFF)** or an Aggregation API layer (often implemented via GraphQL or an API Gateway).
+The frontend makes exactly **one** API call to the BFF. The BFF, living inside the highly-connected server data center, rapidly fans out the 15 internal requests to the microservices, aggregates the responses into a single, clean JSON payload, and sends that consolidated object back to the client device over the slow internet connection.

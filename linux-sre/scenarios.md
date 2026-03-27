@@ -281,3 +281,240 @@ The application should use an SDK to fetch the secret into memory dynamically at
 An inode (index node) is a data structure on a standard Linux filesystem that stores metadata about a file, like its size, permissions, ownership, and pointers to the disk blocks where the data is stored. It does *not* store the file name.
 
 If two different file names (paths) have the exact same inode number (verified via `ls -i`), it means they are **Hard Links**. Hard links act as multiple names pointing to the same underlying inode and data. Because they reference the same inode, changes made to the data under one name are immediately reflected in the other. Hard links cannot span different filesystems.
+
+---
+
+**Q21. [L1] Explain the difference between a Hard Link and a Soft (Symbolic) Link.**
+
+> *What the interviewer is testing:* Filesystem primitives, inodes.
+
+**Answer:**
+- **Hard Link:** A hard link is multiple file paths pointing to the exact same underlying inode (data) on the disk. Because they share the same inode, if you delete the original file, the hard link still retains the data perfectly. Hard links cannot span across different disk partitions or filesystems.
+- **Soft Link (Symlink):** A soft link is a shortcut. It is a completely separate file with its own unique inode, and its contents simply contain the text path pointing to the original file. If you delete the original file, the soft link becomes broken (a "dangling symlink"). Soft links can point across different filesystems and even to directories.
+
+---
+
+**Q22. [L2] Explain the architectural shift from SysVinit to Systemd in modern Linux distributions. Why is Systemd controversial but widely adopted?**
+
+> *What the interviewer is testing:* OS Initialization, parallel boot, service management.
+
+**Answer:**
+**SysVinit** was the legacy approach. It used sequential bash scripts (`/etc/init.d/`) to start services one by one during boot. It was slow, and writing robust bash scripts to track process PIDs for restarts was error-prone.
+**Systemd** is a modern, monolithic init system and suite of tools. 
+- *Why adopted:* It parallelizes service startup, drastically reducing boot times. It uses declarative `Unit files` instead of complex bash scripts. It natively uses cgroups to cleanly track and kill child processes (fixing the daemon escape problem).
+- *Controversy:* The Unix philosophy dictates "do one thing and do it well." Systemd violates this by managing not just the init process, but logging (`journald`), network (`networkd`), cron (`timers`), and DNS (`resolved`), creating a heavy, monolithic dependency chain deep inside the OS layer.
+
+---
+
+**Q23. [L3] A specific application binary is randomly spinning up CPU. You run `strace -p <PID>` to see what system calls it's making, but attaching `strace` slows the application down so severely it almost crashes in production. What modern alternative provides identical visibility without the penalty?**
+
+> *What the interviewer is testing:* The ptrace overhead, introducing eBPF (BCC/bpftrace).
+
+**Answer:**
+`strace` relies on the `ptrace` system call. Every single time the application tries to do anything, `ptrace` forces the kernel to pause the application, do a context switch to the `strace` user-space tool, print the log, and context switch back. In heavily trafficked environments, this 10x overhead cripples the app.
+The modern SRE alternative is **eBPF** (specifically using tools like `bpftrace` or BCC tools).
+eBPF runs a highly optimized, sandboxed program directly inside the kernel. It intercepts the sys-calls securely at the kernel level, aggregates the data in memory, and only passes the summarized findings back to user space asynchronously. The overhead is virtually zero, making it completely safe for profiling high-load production servers.
+
+---
+
+**Q24. [L1] In bash, what does the operator `2>&1` mean, for example in `command > output.log 2>&1`?**
+
+> *What the interviewer is testing:* File descriptors, standard output, standard error.
+
+**Answer:**
+This operator manages file descriptors in Linux: `1` is Standard Output (STDOUT) and `2` is Standard Error (STDERR).
+When running a command, `> output.log` explicitly redirects STDOUT to the file. However, if the command throws an error, it will still print to the terminal, avoiding the file.
+The `2>&1` syntax explicitly tells the shell to redirect file descriptor 2 (STDERR) to the exact same destination as file descriptor 1 (STDOUT). This guarantees that both successful output and failure errors are captured sequentially in `output.log`.
+
+---
+
+**Q25. [L2] What is a "Zombie" process (marked as `Z` in `top`), and why does `kill -9` not remove it?**
+
+> *What the interviewer is testing:* Process lifecycle, parent/child relationships, reaping.
+
+**Answer:**
+A **Zombie** process is a process that has already fully terminated and finished its execution, but still occupies an entry in the process table.
+It happens when a child process exits, but its Parent Process hasn't read its exit status yet (via the `wait()` system call). The kernel keeps the zombie around just to preserve the exit code.
+You cannot `kill -9` a zombie because it is already dead—there is no execution thread left to kill.
+To clear it, you must either:
+1. Fix the Parent Process so it `waits` properly.
+2. If impossible, `kill` the Parent Process. The zombie will then be "orphaned" and automatically adopted by `systemd` (PID 1), which immediately reaps it and clears the process table.
+
+---
+
+**Q26. [L3] A database server has 64GB of RAM and Swap enabled. Swappiness is set to the default of 60. You notice the database occasionally acts sluggish because Linux is using 5GB of Swap, even though 10GB of RAM is perfectly free. You disable Swap entirely via `swapoff -a` to force it entirely into RAM, and sudden OOM Outages begin. Explain this behavior.**
+
+> *What the interviewer is testing:* `vm.swappiness`, Anonymous memory vs Page Cache, memory pressure.
+
+**Answer:**
+Linux actively manages memory between Application Memory (Anonymous) and File Caching (Page Cache).
+A `swappiness` of 60 aggressively pages out idle, rarely used application memory to the relatively slow Swap partition to free up RAM so Linux can cache heavily requested disk files, speeding up overall I/O. 
+When you ran `swapoff`, you ripped away the safety net. Now, when the database makes a sudden, massive memory allocation request, Linux has no Swap to move the idle pages to. It must furiously drop disk caches to find space. If the cache dropping isn't fast enough to satisfy the allocation speed, the kernel enters an Out Of Memory condition and the OOM Killer aggressively terminates the database to save the OS.
+*Fix:* Turn Swap back on, but drastically tune `sysctl vm.swappiness=1` (or 10) to instruct the kernel to only swap out memory absolutely as a last resort before an OOM.
+
+---
+
+**Q27. [L1] You type `uptime` and the Load Average says `4.00, 3.50, 3.00`. The server runs a 4-core CPU. Is the server overloaded?**
+
+> *What the interviewer is testing:* Interpreting load average relative to CPU cores.
+
+**Answer:**
+No, the server is perfectly saturated, but not overloaded.
+Load Average represents the number of processes currently utilizing a CPU core, plus the processes waiting in the queue for a turn.
+If you have 4 CPU cores, a load of exactly `4.00` means every single core is 100% busy doing active work, but zero processes are stuck waiting in a queue. It is maximal efficiency.
+If the load jumped to `8.00` on a 4-core machine, then 4 processes are running, and 4 are waiting—meaning the CPU is severely bottlenecked and users are experiencing delays.
+
+---
+
+**Q28. [L2] You need to run an untrusted application securely. Explain what a `chroot` jail is and why it shouldn't be your only layer of security.**
+
+> *What the interviewer is testing:* Filesystem isolation vs complete containerization.
+
+**Answer:**
+**chroot** (Change Root) modifies the root directory (`/`) for a specific running process and its children. If you `chroot` an app into `/var/jail`, the app believes `/var/jail` is the absolute bottom of the entire filesystem. It physically cannot `cd ../../etc` to steal system passwords.
+*Why it's insufficient:* `chroot` *only* isolates the filesystem view. The application can still see all other processes in the host OS, intercept network traffic, and access host hardware. If the app runs as `root` inside the jail, knowledgeable attackers can craft system calls to escape the `chroot` entirely. True isolation requires Linux Namespaces and Cgroups (e.g., Docker containerization), not just `chroot`.
+
+---
+
+**Q29. [L3] During a massive DDoS attack or viral traffic spike, you see thousands of `SYN_RECV` states in `netstat` and the kernel is dropping legitimate connections with a "syn flooding" message. How do you tune the kernel networking stack on the fly to survive this?**
+
+> *What the interviewer is testing:* Tuning `sysctl`, kernel ring buffers, SYN backlog.
+
+**Answer:**
+The server is dropping packets because the temporary queue that holds incomplete TCP connections (waiting for the final ACK) is full.
+I would dynamically increase the queue limits in the kernel via `sysctl` immediately:
+1. `sysctl -w net.ipv4.tcp_max_syn_backlog=4096` (Increases the size of the incomplete connection queue).
+2. `sysctl -w net.core.somaxconn=4096` (Increases the absolute limit of socket listen queues).
+3. `sysctl -w net.ipv4.tcp_syncookies=1` (Enables SYN Cookies, allowing the kernel to stop saving state for incomplete SYNs entirely, bypassing the backlog limits cryptographically).
+These command-line tweaks take effect immediately without a reboot, mitigating the drops live. I would then save them in `/etc/sysctl.conf`.
+
+---
+
+**Q30. [L1] A log file consists of rows like: `ERROR 2023-10-01 User bob failed login`.
+Using basic Linux text processing, how would you print only the names (like 'bob') of the users who failed?**
+
+> *What the interviewer is testing:* `awk` usage, stream manipulation.
+
+**Answer:**
+I would use `awk`. 
+By default, `awk` splits strings by whitespace into numbered variables. 
+The command would be: `cat app.log | grep "failed login" | awk '{print $4}'`.
+Since "bob" is the 4th word separated by spaces (`ERROR` is $1, date is $2, `User` is $3), it cleanly extracts just the username.
+
+---
+
+**Q31. [L2] A server's disks are incredibly slow. `iostat -x 1` shows %util at 100%. How do you identify whether it's latency on reading data or writing data?**
+
+> *What the interviewer is testing:* Deciphering complex I/O metrics, `iostat` columns.
+
+**Answer:**
+While `%util` shows the disk is completely saturated (100% time spent doing I/O), it doesn't explain the load profile.
+In the `iostat` output, I would focus on two specific column groups:
+- **`r_await` vs `w_await`:** These denote the average wait time (in milliseconds) for Read requests vs Write requests to be served. If `r_await` is 5ms and `w_await` is 500ms, the disk is severely struggling to write.
+- **`rkB/s` vs `wkB/s`:** These denote the actual volume of Kilobytes Read vs Written per second.
+If the write latency is massive, turning on Write-Back caching on a RAID controller, or migrating to an SSD, is the immediate hardware solution.
+
+---
+
+**Q32. [L3] You need to debug a broken Docker image, but the container instantly crashes upon starting, so you can't `docker exec` into it. You want to inspect the actual files inside the image layer directly on the Linux host disk. Where in the filesystem do you look?**
+
+> *What the interviewer is testing:* The overlay2 filesystem, container storage drivers.
+
+**Answer:**
+Docker does not store containers as large VM `.vmdk` files. It uses a Union Filesystem (typically `overlay2`).
+All image layers and actively mutated container filesystems exist as raw directories located in `/var/lib/docker/overlay2/`.
+To find the exact directory for the broken image:
+1. Run `docker inspect <image_tag>`.
+2. Look at the `GraphDriver.Data.MergedDir` attribute.
+3. CD into that absolute path (`/var/lib/docker/overlay2/abc123.../merged`). 
+There, you will see a perfect, unbooted replica of the container's root filesystem ( `/etc`, `/usr`, `/var`). You can use standard Linux tools (`cat`, `vim`) directly on the host to debug the bad config file causing the crash.
+
+---
+
+**Q33. [L1] What is the difference between running `su root` and `su - root`?**
+
+> *What the interviewer is testing:* Linux environments, login shells.
+
+**Answer:**
+- `su root` switches your UID privileges to root, but it explicitly **preserves** your existing user's environment. You keep your old `$PATH`, current working directory, and aliased commands.
+- `su - root` (with the hyphen) forces a full **login shell**. It completely purges your previous environment, resets environment variables, changes the directory to `/root`, and sources root's `.bash_profile`. This is the vastly safer and preferred method, ensuring you aren't accidentally executing harmful bin paths inherited from the unprivileged user.
+
+---
+
+**Q34. [L2] An ex-employee changed the root password of a critical bare-metal Linux server and left. You have physical access to the server but do not know the password. How do you regain control?**
+
+> *What the interviewer is testing:* GRUB manipulation, Rescue Mode, `rd.break`.
+
+**Answer:**
+Since physical access is available, the root password can be reset by interrupting the bootloader (GRUB).
+1. Reboot the server. When the GRUB menu appears, press `e` to edit the kernel boot parameters.
+2. Find the line starting with `linux` or `linux16`. Append `rd.break` (on RHEL/CentOS) or `init=/bin/bash` (on Debian/Ubuntu) to the end of that line, and press Ctrl+X to boot.
+3. This drops you into an emergency root shell *before* the system fully mounts or asks for a password.
+4. Mount the actual root filesystem mathematically with read-write access: `mount -o remount,rw /sysroot` and `chroot /sysroot`.
+5. Run the `passwd` command to comfortably set a new root password. Exit and reboot.
+
+---
+
+**Q35. [L3] The OS memory is exhausted, but `top` and `ps` show that the sum of all running applications is only using 20% of the RAM. You clear the page cache, but the memory is still gone. Where is the "missing" memory?**
+
+> *What the interviewer is testing:* Kernel Slab allocations, dentry/inode caches, memory leaks in kernel modules.
+
+**Answer:**
+If user-space processes and the page cache aren't holding the memory, it is allocated directly within the **Kernel Slab Allocator**. The Slab holds kernel structures like active `dentry` caches (directory paths) or inodes, or it's a literal memory leak caused by a buggy kernel driver.
+I would run the `slabtop` command.
+If `slabtop` shows the `dentry` cache is gigabytes in size, the server has traversed millions of tiny files recently. While normally the system reclaims this under pressure, sometimes a `sysctl vm.drop_caches=3` is required to force the kernel to let go of directory structures, immediately restoring the "missing" memory.
+
+---
+
+**Q36. [L1] In bash scripting, what is the significance of the exit code `$?`, and what does an exit code of `0` mean?**
+
+> *What the interviewer is testing:* Basic shell scripting, POSIX exit conventions.
+
+**Answer:**
+The specialized variable `$?` holds the numeric exit code of the absolute last command executed in the terminal.
+In Linux architecture, an exit code of **`0` means success** (the command executed perfectly without errors). 
+Any numeric exit code greater than 0 (e.g., `1`, `127`, `255`) means failure. This is why scripts often check `if [ $? -eq 0 ]` to decide whether to proceed to the next step or halt and throw an error.
+
+---
+
+**Q37. [L2] You want to quickly check if a web server process is actively listening on port 443, and see what PID is managing it. Both `netstat` and `ss` commands are available. Which is preferred in modern Linux and why?**
+
+> *What the interviewer is testing:* Modern iproute2 suite vs deprecated net-tools.
+
+**Answer:**
+While both achieve the result, **`ss`** (Socket Statistics) is vastly preferred and heavily replaces the deprecated `netstat`.
+- **Performance:** `netstat` parses the `/proc/net` files sequentially. On a heavily loaded proxy server with 50,000 connections, `netstat` is notoriously agonizingly slow and resource-heavy. `ss` queries the kernel directly via the faster `netlink` socket API, returning results instantly regardless of scale.
+- **Command:** `ss -tulpn | grep 443` (TCP, UDP, Listening only, Process, Numeric IP) will efficiently display the exact listening state and the PID directly.
+
+---
+
+**Q38. [L3] An application developer asks you, "Can I read the hardware CPU temperature and exact memory mappings using simple text files rather than writing a C program?" How does the Linux architecture support this?**
+
+> *What the interviewer is testing:* The `/proc` and `/sys` pseudo-filesystems, virtual files.
+
+**Answer:**
+Yes. This is entirely supported by the **`/proc`** and **`/sys`** pseudo-filesystems.
+These are not real physical directories stored on the hard drive; they are dynamic illusions generated strictly in RAM by the kernel.
+When you run `cat /proc/cpuinfo` or `cat /sys/class/thermal/thermal_zone0/temp`, you are not reading a file; you are actually making a direct system call right into the kernel space. The kernel instantly aggregates the hardware or process data and renders it as plain text output to your terminal, adhering strictly to the Linux philosophy that "everything is a file."
+
+---
+
+**Q39. [L2] A legacy cron job runs every 5 minutes (`*/5 * * * *`). It takes 6 minutes to complete, so instances are overlapping, locking the database, and failing. The developer wants to migrate it to `systemd` timers. How does systemd solve this overlapping issue inherently?**
+
+> *What the interviewer is testing:* Cron vs Systemd Timers, execution safety.
+
+**Answer:**
+Traditional cron is notoriously "dumb." It strictly fires by the clock regardless of the state of the previous job, requiring developers to write complex bash `flock` (file locking) wrappers to prevent overlap.
+**Systemd Timers** solve this intrinsically. When you migrate it to a `service.timer` unit, the default behavior of systemd is that it **will not trigger** the linked service unit if that specific service is already actively running. It mathematically protects against overlapping executions without needing a single line of locking code written by the developer.
+
+---
+
+**Q40. [L1] A user downloads a custom binary file `kubectl` into their `~/Downloads` folder. They type `kubectl` in the terminal, but get `command not found`. Why, and how do they fix it permanently?**
+
+> *What the interviewer is testing:* The `$PATH` environment variable.
+
+**Answer:**
+The shell relies on the **`$PATH`** environment variable, which is an ordered list of directories (like `/usr/bin` or `/usr/local/bin`). When you type a command, the system only searches those exact directories for the executable. It does not actively search `~/Downloads`.
+To fix it, they must either:
+1. Move the binary into an authorized path: `sudo mv ~/Downloads/kubectl /usr/local/bin/` 
+2. Permanently add the Downloads directory to their path by appending `export PATH=$PATH:~/Downloads` to their `~/.bashrc` or `~/.zshrc` profile, so the shell learns to search there automatically.
