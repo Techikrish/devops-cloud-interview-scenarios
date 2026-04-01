@@ -12,18 +12,6 @@ Each domain has its own folder with a `scenarios.md` file:
 
 ```
 devops-cloud-interview-scenarios/
-<<<<<<< HEAD
-├── ☸️ kubernetes/scenarios.md          ~150 questions
-├── ☁️ aws/scenarios.md                 ~100 questions
-├── 🔄 ci-cd/scenarios.md               ~60 questions
-├── 🏗️ terraform/scenarios.md           ~60 questions
-├── 🐳 docker/scenarios.md              ~80 questions
-├── 🐧 linux-sre/scenarios.md           ~40 questions
-├── 📊 observability/scenarios.md       ~40 questions
-├── 🌐 networking/scenarios.md          ~40 questions
-├── 🔒 security/scenarios.md            ~40 questions
-├── ⚙️ general-devops/scenarios.md      ~40 questions
-=======
 ├── ☸️ kubernetes/scenarios.md          150 questions
 ├── ☁️ aws/scenarios.md                 120 questions
 ├── 🔄 ci-cd/scenarios.md               80 questions
@@ -34,7 +22,6 @@ devops-cloud-interview-scenarios/
 ├── 🌐 networking/scenarios.md          40 questions
 ├── 🔒 security/scenarios.md            40 questions
 ├── ⚙️ general-devops/scenarios.md      40 questions
->>>>>>> ff4580e (fix: Update README question count to 690+)
 ├── 📄 README.md (this file)
 ├── 🤝 CONTRIBUTING.md                  (how to contribute)
 ├── 📜 LICENSE
@@ -45,18 +32,6 @@ devops-cloud-interview-scenarios/
 
 | Domain | Focus | Questions |
 |--------|-------|-----------|
-<<<<<<< HEAD
-| ☸️ [Kubernetes](./kubernetes/scenarios.md) | Container orchestration, pod debugging, deployments, networking | ~150 |
-| ☁️ [AWS](./aws/scenarios.md) | EC2, S3, RDS, IAM, Networking, Cost Optimization | ~100 |
-| 🔄 [CI/CD](./ci-cd/scenarios.md) | Pipelines, GitOps, deployments, testing, secret management | ~60 |
-| 🏗️ [Terraform](./terraform/scenarios.md) | State management, modules, locking, imports, best practices | ~60 |
-| 🐳 [Docker](./docker/scenarios.md) | Images, containers, networking, multi-stage builds, security | ~80 |
-| 🐧 [Linux / SRE](./linux-sre/scenarios.md) | System administration, performance tuning, incident response | ~40 |
-| 📊 [Observability](./observability/scenarios.md) | Monitoring, logging, metrics, tracing, alerting | ~40 |
-| 🌐 [Networking](./networking/scenarios.md) | VPCs, security groups, routing, DNS, load balancing | ~40 |
-| 🔒 [Security](./security/scenarios.md) | IAM, secrets, encryption, compliance, supply chain | ~40 |
-| ⚙️ [General DevOps](./general-devops/scenarios.md) | Cross-domain, disaster recovery, automation | ~40 |
-=======
 | ☸️ [Kubernetes](./kubernetes/scenarios.md) | Container orchestration, pod debugging, deployments, networking | 150 |
 | ☁️ [AWS](./aws/scenarios.md) | EC2, S3, RDS, IAM, Networking, Cost Optimization | 120 |
 | 🔄 [CI/CD](./ci-cd/scenarios.md) | Pipelines, GitOps, deployments, testing, secret management | 80 |
@@ -67,7 +42,6 @@ devops-cloud-interview-scenarios/
 | 🌐 [Networking](./networking/scenarios.md) | VPCs, security groups, routing, DNS, load balancing | 40 |
 | 🔒 [Security](./security/scenarios.md) | IAM, secrets, encryption, compliance, supply chain | 40 |
 | ⚙️ [General DevOps](./general-devops/scenarios.md) | Cross-domain, disaster recovery, automation | 40 |
->>>>>>> ff4580e (fix: Update README question count to 690+)
 
 
 ---
