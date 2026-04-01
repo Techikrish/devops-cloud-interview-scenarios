@@ -704,4 +704,241 @@ The goal: a developer creating a new service gets a full CI/CD pipeline out of t
 
 ---
 
+**Q61. [L2] Your team heavily utilizes GitHub Actions, but the monthly bill for GitHub-hosted runners has skyrocketed. You want to switch to self-hosted runners, but are worried about security and state poisoning if runners are reused. How do you implement this safely?**
+
+> *What the interviewer is testing:* Ephemeral self-hosted CI agents.
+
+**Answer:**
+You must undeniably use **Ephemeral Runners** combined with Auto-Scaling (e.g., Actions Runner Controller in Kubernetes).
+A standard self-hosted runner executes a job and remains alive to accept the next one. This means a malicious PR could execute `docker run crypto-miner` in the background, or leave behind hidden malware in the `/tmp` directory that instantly infects the next team's build.
+By passing the `--ephemeral` flag when registering the runner, the runner mathematically guarantees it will cleanly accept only **one** single job. The moment the job finishes, the runner aggressively unregisters itself and the underlying Pod or EC2 instance is completely destroyed, guaranteeing an immutable, clean slate for every build.
+
+---
+
+**Q62. [L2] Your Kubernetes deployments in CI frequently fail with "ErrImagePull" and "Too Many Requests" from Docker Hub. How do you permanently eliminate Docker Hub rate limiting in your CI/CD pipelines?**
+
+> *What the interviewer is testing:* Registry caching, authenticated pulls, pull-through cache.
+
+**Answer:**
+Docker Hub limits unauthenticated pulls to 100 per 6 hours per IP. CI NAT gateways run out of this allowance instantly.
+1. **Authenticated Pulls:** The simplest fix is injecting Docker Hub credentials securely into the CI pipeline and Kubernetes pull-secrets. Authenticated users get much higher limits.
+2. **Pull-Through Cache (Best Practice):** Relying on the public internet for critical CI builds is dangerous. Configure AWS ECR, Harbor, or Artifactory to act as a **Pull-Through Cache**. 
+The CI pipeline points specifically to your internal registry (e.g., `my-registry.com/dockerhub/ubuntu:latest`). If the internal registry doesn't explicitly have it, it fetches it from Docker Hub once, heavily caches it locally forever, and serves it instantly to all future pipelines with zero rate limits and blazing fast local network speeds.
+
+---
+
+**Q63. [L3] A critical deployment pipeline fails completely because an End-to-End (E2E) Selenium UI test timed out. The developer checks the logs, sees the UI test was just checking a non-critical button color, restarts the pipeline, and it magically passes. How do you architecturally solve this flaky E2E issue from destroying team velocity?**
+
+> *What the interviewer is testing:* Test pyramids, test isolation, quarantine mechanisms.
+
+**Answer:**
+This is a systemic failure of the **Test Pyramid**. 
+UI E2E tests are inherently brittle and slow. If a test is flaky, it destroys developer trust until they start blindly bypassing the CI entirely.
+1. **Quarantine:** Immediately tag the flaky test and move it out of the critical blocking pipeline. Run quarantined tests in an asynchronous nightly job until an engineer can explicitly fix its determinism.
+2. **Shift Left:** Move the button-color assertion down the pyramid into a blazing fast Unit Test (e.g., using Jest/React Testing Library) which doesn't require launching a heavy, brittle headless browser.
+3. **Mock External State:** If the E2E test relies on the network responding perfectly in 500ms, it will always randomly fail. Mock the API layer robustly so the E2E test strictly evaluates frontend logic, not network jitter.
+
+---
+
+**Q64. [L3] Your CI/CD pipeline deploys Application v2 and automatically runs Flyway to apply Database Migration V2. Ten minutes later, a critical bug is found. You swiftly click "Rollback" to Application v1. The pods securely spin up, hit the database, and immediately violently crash. Why, and how must migrations be structured in CI/CD?**
+
+> *What the interviewer is testing:* Backward-compatible migrations, Expand & Contract deployment patterns.
+
+**Answer:**
+The application crashed because the **Database schema rolled forward, but the application code rolled backward**. 
+If Migration V2 dropped a column or renamed a table, Application v1 mathematically cannot function anymore because the database it expects no longer exists physically. 
+*Architectural Fix:* You must strictly enforce the **Expand and Contract Pattern** for database migrations:
+1. **Expand (Release 1):** The migration simply *adds* the new column. The old Application v1 ignores it. Both v1 and v2 can safely run simultaneously.
+2. **Migrate Data (Release 2):** Background jobs fill the new column cleanly.
+3. **Contract (Release 3):** Only after Application v1 has been completely decommissioned and deleted for weeks, a new migration is allowed to finally physically drop the old column.
+This ensures instant, painless rollbacks are always architecturally possible.
+
+---
+
+**Q65. [L2] In GitLab CI, you have 5 independent stages. Stage 3 logically cannot begin until Stage 2 finishes. However, Job X in Stage 3 relies strictly on Job A in Stage 1, completely ignoring Stage 2. How do you optimize the pipeline heavily so Job X isn't needlessly waiting?**
+
+> *What the interviewer is testing:* Directed Acyclic Graphs (DAG) in CI.
+
+**Answer:**
+You would utilize a **Directed Acyclic Graph (DAG)** by implementing the `needs:` keyword.
+By default, GitLab CI fundamentally operates sequentially: all jobs in Stage 1 must absolutely finish before *any* job in Stage 2 can begin.
+By defining `needs: [job_a]` explicitly heavily on Job X, you break the rigid stage barrier. GitLab will instantly execute Job X the millisecond that Job A finishes, entirely ignoring the fact that Stage 2 jobs are still slowly churning. This dramatically accelerates parallel execution and drastically reduces overall pipeline wall-clock time.
+
+---
+
+**Q66. [L2] Your GitHub Actions pipeline uses a long-lived AWS Access Key to deploy securely to EKS. The security team mandates that no static long-lived keys can ever be stored in GitHub Secrets due to exfiltration risks. How do you deploy natively without keys?**
+
+> *What the interviewer is testing:* OpenID Connect (OIDC) federation.
+
+**Answer:**
+You must implement **OpenID Connect (OIDC)** identity federation.
+1. In AWS IAM, you natively register GitHub Actions as an authorized OIDC Identity Provider (IdP).
+2. You create an IAM Role that explicitly trusts this IdP, attaching a Condition specifying that only your specific GitHub repository (`repo:my-org/my-app:*`) is allowed to assume it.
+3. In the GitHub Actions YAML, use `aws-actions/configure-aws-credentials` and simply provide the IAM Role ARN.
+GitHub dynamically requests a short-lived cryptographic JWT token, presents it natively to AWS STS, and receives temporary session credentials valid exclusively for the exact duration of the execution. There are zero static secrets to rotate or steal.
+
+---
+
+**Q67. [L3] Your company transitions entirely to a massive Monorepo housing 50 microservices. A developer alters the `README.md` in the root directory. Suddenly, 50 individual CI/CD pipelines trigger simultaneously, deploying all 50 services to production. How do you architect the CI to intelligently prevent this?**
+
+> *What the interviewer is testing:* Monorepo change detection, path filtering, dependency graph analysis.
+
+**Answer:**
+Monorepos require highly intelligent **Path Filtering** and **Dependency Graph Analysis**.
+1. **Path Filters:** In GitHub Actions (`paths:`) or GitLab (`rules: changes:`), explicitly restrict service deployments to trigger *only* if code actually changes physically inside that service's highly isolated directory (`src/services/service-a/**`).
+2. **Dependency Graphing:** This easily breaks if `service-a` relies heavily on a shared library (`src/libs/auth`). If `auth` changes, `service-a` *must* confidently rebuild. Tools like **Nx, Bazel, or Turborepo** are absolutely mandatory here. They mathematically generate an internal AST dependency graph. If a commit touches `auth`, the tool intelligently analyzes the graph and explicitly triggers builds strictly for the specific subset of dependent microservices, entirely ignoring the other 49.
+
+---
+
+**Q68. [L1] A junior engineer configures the CI pipeline to outright fail explicitly if Code Coverage natively drops identically below `100%`. Why is this considered an extreme anti-pattern in DevOps engineering?**
+
+> *What the interviewer is testing:* Law of Diminishing Returns, realistic metrics, Goodhart's Law.
+
+**Answer:**
+Because of **Goodhart's Law**: "When a measure becomes a target, it ceases to be a good measure."
+Mandating 100% test coverage heavily incentivizes developers to write incredibly brittle, meaningless assertion-less tests simply to trick the coverage parser into executing every line of code. It actively punishes refactoring and destroys velocity.
+Furthermore, the last 15% of coverage usually involves mocking obscure framework internals or impossible exception states (like the server catching fire), offering zero actual business value while doubling development time. Focus strictly heavily on tracking *critical path* functionally and keeping coverage around a realistic 70-85%.
+
+---
+
+**Q69. [L2] Your Artifactory (or Nexus) server abruptly crashes on a Thursday. You discover the disk is 100% full. The CI pipeline has been uploading every single 1GB Docker image and 500MB Java JAR from every single minor commit strictly for the past three years. How do you design an automated, resilient retention policy?**
+
+> *What the interviewer is testing:* Artifact lifecycle management, snapshot vs release.
+
+**Answer:**
+Artifact registries must never be treated as infinite black holes. You must ruthlessly separate **Snapshots** (ephemeral development builds) from **Releases** (production artifacts).
+1. Configure the strict registry retention policies differently:
+   - **Snapshots/Feature Branches:** Ruthlessly delete these completely after 30 days, or explicitly retain only the 5 most recent builds per specific branch. They are inherently disposable.
+   - **Releases/Tags:** Retain Production-tagged artifacts indefinitely (or specifically bound to organizational compliance data-retention laws).
+2. Institute automated garbage collection pipelines that periodically aggressively purge isolated, untagged, dangling images across the registry to constantly enforce the baseline storage limits without manual intervention.
+
+---
+
+**Q70. [L3] For six months, the team has heavily used "Feature Flags" to safely test code in production. However, during a routine deployment, an engineer accidentally flips an old, forgotten flag named `new_payment_gateway_v1`. Production instantly goes down. What systemic process failed?**
+
+> *What the interviewer is testing:* Feature Flag Technical Debt, Lifecycle management.
+
+**Answer:**
+The team treated feature flags essentially as permanent configuration switches rather than highly **Ephemeral Technical Debt**.
+When a feature is successfully rolled out to 100% of users and validated, the flag transitions explicitly from a safety mechanism into a highly dangerous loaded gun hidden in the codebase.
+*The Process Fix:* Feature Flags must possess a strict, trackable lifecycle heavily integrated into the sprint. Once a flag hits 100% adoption, an automated ticket must be generated directly into the team backlog heavily prioritizing the explicit removal of the flag logic from the codebase. Many enterprise tools natively flag stale flags that haven't toggled strictly in ~30 days, alerting the team to brutally delete them.
+
+---
+
+**Q71. [L2] A critical Sev-1 incident halts production checkout. The team utilizes strict Trunk-Based Development. Do you create a `hotfix` branch explicitly off the broken production release tag, urgently fix it, deploy it directly, and explicitly merge it back to main later?**
+
+> *What the interviewer is testing:* Trunk-based hotfix patterns, "Roll-Forward" mentality.
+
+**Answer:**
+**No.** That is a traditional Git-Flow anti-pattern. If you heavily branch off production and deploy directly, you run the immense risk of forgetting to merge the explicit fix strictly back into `main`. The exact next standard sprint deployment will fatally overwrite your isolated fix, causing the Sev-1 incident to violently reappear identically.
+In strict Trunk-Based Development, you fundamentally **Fix Forward**. You branch the hotfix directly off `main`, rapidly push the fix directly to `main`, allow the CI pipeline to run an accelerated emergency suite, and instantly deploy `main` strictly back into production. `main` must absolutely always heavily remain the central source of unadulterated truth constantly.
+
+---
+
+**Q72. [L3] Your CI/CD pipeline runs `helm upgrade` heavily to deploy to production. Midway through the deployment, the new pods wildly crash-loop because someone provided an invalid database password in the Secrets file. Helm sits indefinitely in a "Pending-Upgrade" status. What critical Helm CI flags were forgotten?**
+
+> *What the interviewer is testing:* Helm atomicity, `--wait`, `--atomic`.
+
+**Answer:**
+By default, `helm upgrade` is a "fire-and-forget" command. It confidently tells the Kubernetes API to update the deployment and immediately boldly returns a `Success (Exit Code 0)` back to the CI pipeline, strictly before Kubernetes even begins attempting to pull the new broken containers.
+To ensure the CI aggressively accurately reflects cluster reality:
+1. You must append `--wait`. Helm will actively intensely monitor the K8s rollout status and actively block the CI pipeline until the pods are completely natively `Ready`.
+2. You must heavily append `--atomic`. If the pods wildly enter a CrashLoopBackOff and heavily fail the `--wait` timeout, `--atomic` forces Helm to automatically completely unroll the deployment safely back to the exact previous stable release flawlessly, leaving the cluster entirely healthy without human intervention.
+
+---
+
+**Q73. [L2] You have 40 distinct repositories. Each repository contains an identical `.gitlab-ci.yml` file heavily duplicating a 100-line shell script that securely deploys to Kubernetes. Security mandates a change to this script securely. How do you implement DRY (Don't Repeat Yourself) fundamentally in CI pipelines?**
+
+> *What the interviewer is testing:* Pipeline Templates, Shared Libraries.
+
+**Answer:**
+You must heavily abstract the execution logic into inherently central **Pipeline Templates**.
+- In **GitLab CI**, you create a centralized "DevOps" repository heavily containing a `deploy-template.yml`. The 40 repositories simply use the `include: - project: 'devops/templates' file: 'deploy-template.yml'` syntax to remotely import the specific logic.
+- In **GitHub Actions**, heavily utilize **Reusable Workflows**.
+- In **Jenkins**, strictly enforce **Shared Libraries** written in immutable Groovy.
+When the security team mandates a change, you elegantly update the single central template explicitly, and all 40 repositories securely inherit the exact identical update seamlessly on their next immediate pipeline execution natively.
+
+---
+
+**Q74. [L2] You correctly configure GitHub Branch Protection heavily to enforce "Require Pull Request approvals before merging" on `main`. However, the lead developer simply pushes heavily directly to `main` anyway, ignoring the pipeline completely. Why didn't GitHub block them natively?**
+
+> *What the interviewer is testing:* Administrator bypass, strictly enforcing protections.
+
+**Answer:**
+By default in GitHub, Branch Protection Rules implicitly natively **exempt Repository Administrators and Organization Owners**. Because the lead developer possessed explicitly elevated Admin rights, the platform natively allowed them to boldly bypass the strict rules heavily at their own discretion.
+*Fix:* You must explicitly intensely check the setting **"Include administrators"** (or "Enforce all configured restrictions above for administrators" in exact terminology) buried within the branch protection rules. This democratizes the pipeline, heavily guaranteeing that absolutely nobody, not even the supreme Organization Owner, can ever unilaterally bypass the CI/CD pipeline checks natively.
+
+---
+
+**Q75. [L3] Your massive Jenkins Master node repeatedly crashes heavily with `OutOfMemoryError` identically every Friday afternoon, despite possessing 32GB of RAM. You securely isolated all actual compilation execution off to distributed Jenkins worker nodes. Why is the Master still fatally crashing under load?**
+
+> *What the interviewer is testing:* Master-node JVM heap exhaustion, Pipeline Sandbox parsing, build history bloat.
+
+**Answer:**
+Even if you offload physical execution to workers natively, the Jenkins Master JVM is still heavily strictly responsible for dynamically parsing, compiling, and persistently tracking the immense Groovy AST (Abstract Syntax Tree) state for every single highly complex Declarative/Scripted Pipeline executing across the entire cluster.
+1. **Pipeline State Bloat:** Highly complex `parallel` loops or deeply nested loops deeply exhaust the Master JVM memory because it aggressively tracks execution state continuously.
+2. **Build History:** Aggressively immense amounts of un-rotated build history metadata loading heavily into the GUI crashes the JVM fundamentally.
+*Fix:* You must mandate the `Discard Old Builds` plugin securely, drastically simplify the Groovy logic, ensure strictly NO massive parsing happens on the Master explicitly via `@NonCPS`, and aggressively rotate the JVM garbage collector tuning.
+
+---
+
+**Q76. [L2] The QA team strongly complains that testing new features heavily bottlenecks because the solitary "Staging" environment natively is constantly occupied or broken by conflicting developer branches. How do you permanently resolve this environmental constraint?**
+
+> *What the interviewer is testing:* Ephemeral Preview Environments per PR.
+
+**Answer:**
+You dynamically eliminate the physical bottleneck by intensely adopting **Ephemeral Preview Environments**.
+When a developer strictly opens a Pull Request natively, the CI pipeline heavily leverages GitOps (e.g., ArgoCD namespaces or Terraform workspaces) to explicitly auto-provision a completely isolated, miniature replica fully of the application securely bound to a dynamically generated URL (`pr-405.staging.company.com`).
+The QA team explicitly intensely tests that specific PR heavily in total isolation natively. When the PR securely merges and closes, the pipeline receives a webhook to aggressively physically natively tear down and delete the temporary environment, saving huge infrastructural costs securely.
+
+---
+
+**Q77. [L2] Your team heavily integrates a massive 5GB Artificial Intelligence Machine Learning model binary dynamically into a Python application. The CI pipeline fetches this huge file heavily from S3 natively on every test execution, making pipelines take violently over 45 minutes simply downloading files. How do you resolve this?**
+
+> *What the interviewer is testing:* Pre-baking AMIs/Images, caching limits.
+
+**Answer:**
+You cannot fundamentally cache a massive 5GB file efficiently via standard ephemeral CI caching mechanisms natively (they often forcefully timeout or natively exceed size quotas).
+*Fix:* You must heavily transition to a **Pre-baking Strategy**.
+Instead of fetching the model heavily at build execution time natively, heavily create a dedicated cron pipeline that expressly securely cooks the 5GB model deep into a foundational Docker Base Image natively (`company/ml-base-model:v2`).
+The standard CI pipeline seamlessly securely updates its Dockerfile expressly pointing to `FROM company/ml-base-model:v2`. Because the immense model is already physically pre-cached securely in the immutable layer natively on the registry/nodes, the pipeline safely completes instantaneously natively.
+
+---
+
+**Q78. [L3] The stringent security compliance team completely mandates that production Kubernetes clusters must physically refuse to deploy any container image natively that wasn't strictly built and verified securely exclusively by the trusted corporate CI pipeline. How do you heavily enforce this cryptography fundamentally?**
+
+> *What the interviewer is testing:* Container signing (Sigstore/Cosign), Admission Controllers.
+
+**Answer:**
+You must implement an overarching **Cryptographic Supply Chain Security Architecture** natively.
+1. **Signing locally in CI:** Immediately after heavily compiling and aggressively pushing the Docker image securely to the registry natively, the CI pipeline natively leverages a tool explicitly like **Cosign (Sigstore)** (or Docker Content Trust) explicitly securely to cryptographically sign the specific Image SHA exactly using a highly guarded private key.
+2. **Admission Controller Validation:** In the Production Kubernetes cluster natively, install a Mutating/Validating Admission Webhook (fundamentally like Kyverno heavily or OPA Gatekeeper). When ArgoCD instructs Kubernetes to strictly deploy the image natively, the Admission Controller violently pauses the request heavily, explicitly queries the registry securely natively for the signature, and mathematically aggressively verifies it strictly heavily against the authorized public key securely. If validation fails, deployment is furiously physically rejected natively.
+
+---
+
+**Q79. [L3] You strictly transition exactly to an ArgoCD GitOps architecture smoothly. However, ArgoCD perpetually strongly complains that a specific Kubernetes Application is hopelessly constantly "Out of Sync", even though you literally just deployed it. No humans physically touched the cluster. What invisible force is causing this?**
+
+> *What the interviewer is testing:* GitOps drift caused by Mutating Admission Webhooks natively (e.g., Istio sidecars).
+
+**Answer:**
+This is aggressively commonly intensely caused explicitly by **Mutating Admission Webhooks** natively operating silently entirely within the cluster.
+When ArgoCD tightly heavily deploys your vanilla `Deployment.yaml` strictly from Git, it strongly assumes the cluster state will strictly heavily match Git flawlessly. However, after the K8s API aggressively intercepts the physical deployment securely, an internal webhook securely (like an **Istio Sidecar Injector** or an AWS IAM role annotator) profoundly physically modifies the Pod specification directly underneath ArgoCD, furiously securely adding containers or profound labels natively.
+Because ArgoCD aggressively compares Git to the altered live cluster, it falsely strictly identifies an immense drift securely natively.
+*Fix:* You must explicitly strictly instruct ArgoCD securely violently in its configuration heavily to strictly `# argocd.argoproj.io/compare-options: IgnoreExtraneous` natively or aggressively securely configure it expressly to silently ignore the specific webhook-injected JSON paths natively completely entirely heavily to rapidly restore synchronization.
+
+---
+
+**Q80. [L3] Your team heavily tightly controls a specialized stateful backend deeply handling thousands of long-lived WebSockets explicitly continuously. The business strictly demands an aggressive zero-downtime deployment strategy natively tightly without violently severing the user connections furiously aggressively. Is standard Blue/Green the correct strict mechanism securely heavily?**
+
+> *What the interviewer is testing:* WebSocket statelessness, graceful degradation strategies securely.
+
+**Answer:**
+**Absolutely No.** Standard Blue/Green fiercely flips the Load Balancer furiously instantly heavily natively. Active TCP WebSockets physically violently explicitly deeply bound securely directly heavily to the old instances will forcefully immediately abruptly strictly violently terminate natively immediately, causing massive connection drops entirely natively completely thoroughly.
+*Fix:* You must intensely uniquely natively adopt a **Graceful Rolling Degradation** strategy explicitly:
+1. Heavily spin up the entire newly K8s ReplicaSet intensely completely independently natively.
+2. Configure the K8s Service firmly aggressively to explicitly only direct *new* incoming WebSocket handshake connections exclusively explicitly towards exclusively explicitly only heavily the new strictly completely explicitly new Pods violently Native completely exclusively heavily entirely uniquely.
+3. Completely vigorously aggressively dispatch a `SIGTERM` exclusively completely furiously deeply explicitly to the old Pods heavily entirely natively natively exclusively. The application code must strictly securely explicitly fiercely intercept the signal completely heavily explicitly internally and heavily strongly cleanly forcefully send a delicate application-level explicit "reconnect explicitly" secure frame payload down explicitly internally completely aggressively internally to the specific connected client natively thoroughly heavily uniquely securely strictly to furiously strictly seamlessly reconnect cleanly.
+
+---
+
 *More CI/CD scenarios added periodically. PRs welcome.*

