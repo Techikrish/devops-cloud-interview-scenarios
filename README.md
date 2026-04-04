@@ -1,6 +1,6 @@
 # 🚀 DevOps & Cloud — Scenario-Based Interview Questions
 
-> **690+ real-world scenario questions with plain-language answers** — covering Kubernetes, AWS, CI/CD, Terraform, Docker, Linux/SRE, Observability, Networking, and Security.
+> **710+ real-world scenario questions with plain-language answers** — covering Kubernetes, AWS, CI/CD, Terraform, Docker, Linux/SRE, Observability, Networking, and Security.
 
 This repo was built as a study companion for DevOps and Cloud engineers preparing for interviews at all levels. The focus is on **scenario-based questions** — the kind where an interviewer describes a real situation and asks *"what would you do?"* — because that's how mid-to-senior interviews actually work.
 
@@ -17,9 +17,9 @@ devops-cloud-interview-scenarios/
 ├── 🔄 ci-cd/scenarios.md               80 questions
 ├── 🏗️ terraform/scenarios.md           60 questions
 ├── 🐳 docker/scenarios.md              80 questions
-├── 🐧 linux-sre/scenarios.md           40 questions
-├── 📊 observability/scenarios.md       40 questions
-├── 🌐 networking/scenarios.md          40 questions
+├── 🐧 linux-sre/scenarios.md           47 questions
+├── 📊 observability/scenarios.md       47 questions
+├── 🌐 networking/scenarios.md          46 questions
 ├── 🔒 security/scenarios.md            40 questions
 ├── ⚙️ general-devops/scenarios.md      40 questions
 ├── 📄 README.md (this file)
@@ -37,9 +37,9 @@ devops-cloud-interview-scenarios/
 | 🔄 [CI/CD](./ci-cd/scenarios.md) | Pipelines, GitOps, deployments, testing, secret management | 80 |
 | 🏗️ [Terraform](./terraform/scenarios.md) | State management, modules, locking, imports, best practices | 60 |
 | 🐳 [Docker](./docker/scenarios.md) | Images, containers, networking, multi-stage builds, security | 80 |
-| 🐧 [Linux / SRE](./linux-sre/scenarios.md) | System administration, performance tuning, incident response | 40 |
-| 📊 [Observability](./observability/scenarios.md) | Monitoring, logging, metrics, tracing, alerting | 40 |
-| 🌐 [Networking](./networking/scenarios.md) | VPCs, security groups, routing, DNS, load balancing | 40 |
+| 🐧 [Linux / SRE](./linux-sre/scenarios.md) | System administration, performance tuning, incident response | 47 |
+| 📊 [Observability](./observability/scenarios.md) | Monitoring, logging, metrics, tracing, alerting | 47 |
+| 🌐 [Networking](./networking/scenarios.md) | VPCs, security groups, routing, DNS, load balancing | 46 |
 | 🔒 [Security](./security/scenarios.md) | IAM, secrets, encryption, compliance, supply chain | 40 |
 | ⚙️ [General DevOps](./general-devops/scenarios.md) | Cross-domain, disaster recovery, automation | 40 |
 
