@@ -473,3 +473,280 @@ The server makes the decision using the **Subnet Mask**.
 When it wants to talk to a destination IP, it mathematically performs a bitwise AND operation using its own IP, the destination IP, and the subnet mask.
 - If the calculation results in the same network prefix, the server knows the destination is on its local LAN. It sends an ARP request to get the destination's MAC address and talks to it directly across the switch.
 - If the network prefixes do not match, the server knows the destination is on a remote, foreign network. It immediately sends the packet to its **Default Gateway** (the router's MAC address), relying on the router to navigate the wider internet.
+
+---
+
+**Q41. [L2] You enable VPC Flow Logs on a production VPC, dumping 100GB per day of accept/reject traffic to S3. A developer is having connectivity issues, but analyzing raw logs is impossible. What queries do you run to isolate the problematic traffic pattern?**
+
+> *What the interviewer is testing:* VPC Flow Logs interpretation, log analysis, network troubleshooting.
+
+**Answer:**
+VPC Flow Logs capture every packet at the ENI (Elastic Network Interface) level. Each log entry includes source IP, destination IP, port, action (ACCEPT/REJECT), and protocol.
+
+**Quick queries (using Athena/S3 SQL):**
+
+**Find all rejected traffic to a specific destination:**
+```sql
+SELECT srcaddr, dstaddr, dstport, protocol, COUNT(*) as attempts
+FROM vpc_flow_logs
+WHERE dstaddr = '10.0.2.50'  -- The destination with issues
+  AND action = 'REJECT'
+  AND day >= '2025-01-15'
+GROUP BY srcaddr, dstaddr, dstport, protocol
+ORDER BY attempts DESC
+```
+This reveals: Is traffic being dropped at the NACL or Security Group level? From which source IPs?
+
+**Check if the destination itself is rejecting or the network layer is:**
+```sql
+-- REJECT at NACL (dst_port will be XXXX)
+SELECT COUNT(*) FROM vpc_flow_logs 
+WHERE tcp_flags = 'R' AND action = 'REJECT'  -- RST packets indicate destination rejected
+
+-- ACCEPT at network, but no return (possible security group issue on return path)
+SELECT srcaddr, 
+       CASE WHEN srcaddr = '10.0.1.10' THEN 'outbound'
+            WHEN dstaddr = '10.0.1.10' THEN 'inbound'
+       END as direction,
+       action, COUNT(*) as packets
+FROM vpc_flow_logs
+WHERE (srcaddr = '10.0.1.10' OR dstaddr = '10.0.1.10')
+GROUP BY srcaddr, direction, action
+```
+
+**Root cause scenarios:**
+- More REJECT than ACCEPT on a port: NACL or Security Group rules are asymmetric (outbound allowed but inbound blocked).
+- ACCEPT logged but application still fails: Application isn't listening, or OS firewall is blocking (check target security group egress rules).
+- No logs at all for a destination: Traffic never reached the VPC (routing issue upstream).
+
+---
+
+**Q42. [L1] IPv4 address spaces are running out globally. Your company is expanding to IPv6. What are practical challenges in deploying IPv6-only services on AWS, and why hasn't dual-stack become universal?**
+
+> *What the interviewer is testing:* IPv6 deployment, backward compatibility, network modernization challenges.
+
+**Answer:**
+While IPv6 solves address exhaustion, it hasn't replaced IPv4 due to **compatibility, operational complexity, and cost**:
+
+**IPv6 Challenges on AWS:**
+
+1. **Dual-stack deployment required:** Most users still have IPv4-only ISPs or devices. Services must support *both* IPv4 and IPv6 simultaneously for 5+ years. This is expensive: maintain two separate load balancers, route tables, and security groups.
+
+2. **Client fragmentation:**
+   - Corporate offices: IPv4-only
+   - Mobile carriers (Verizon, AT&T): IPv6 "Carrier-Grade NAT" (clients see both)
+   - Residential ISPs: 80% IPv4-only globally
+   - Result: Your service must accept both, or abandon significant user bases.
+
+3. **DNS complexity:** DNS AAAA records (IPv6) and A records (IPv4) must be kept in sync. Buggy clients might resolve IPv6 but fail to connect, silently falling back to IPv4. Testing this matrix is painful.
+
+4. **AWS-specific issues:**
+   - EC2 subnet design: Assigning both IPv4 and IPv6 CIDR blocks to every subnet adds complexity (NAT64 for IPv6-only outbound, CGNATv6 complications).
+   - NAT64 gateways still required if you want IPv6 internal services talking to IPv4-only external APIs (Netflix, Slack, etc.).
+   - Third-party tools (Kubernetes, Terraform, Docker) have varying IPv6 support (many still rough).
+
+5. **Operational cost:** Every network design decision (VPC peering, load balancer rules, security groups) must account for both. Team must double their testing matrix.
+
+**Why dual-stack hasn't won:**
+Running IPv6-only (no IPv4) fails for ~60% of global users. Running IPv4-only avoids the complexity for now. Running both is expensive ($50k+ engineering time per team).
+
+**Practical approach (2025):**
+- New greenfield services: Deploy as IPv6-primary with IPv4-fallback (single A record, dual AAAA + SRV).
+- Legacy services: Stay IPv4 until forced; IPv6 support is gradual (not revolutionary).
+- AWS recommendation: Use dual-stack ALBs with both IPv4 and IPv6 CIDR blocks, but operationally assume IPv4 is primary for 5+ years.
+
+---
+
+**Q43. [L3] Your latency between London and Tokyo (transcontinental WAN link) is high on a single large file transfer (scp, 50GB file). Speedtest shows 10 Gbps available, but SCP maxes out at 150 Mbps. The link is 99% idle. Why is TCP not filling the available bandwidth, and what is the root cause?**
+
+> *What the interviewer is testing:* TCP Window Scaling, RTT impact, long-distance performance tuning.
+
+**Answer:**
+This is a classic **TCP Window Size** limitation over high-latency links. TCP's congestion window grows slowly, and it's fundamentally designed for Local Area Networks (LAN latency ~1ms), not intercontinental links (~150ms RTT).
+
+**Root Cause Math:**
+TCP's maximum throughput is: `Throughput = (TCP_Window_Size / RTT)`
+
+London-Tokyo RTT ≈ 150ms (150,000 microseconds).
+
+Default TCP window on Linux: 64KB.
+`Max throughput = 64KB / 0.15s = 3.4 Mbps`
+
+**Why SCP only achieves 150 Mbps instead of 10 Gbps?**
+- SCP sends ~2MB per window, then waits 150ms for ACK before sending more.
+- In 150ms of waiting, the pipe sits idle. The bandwidth is *available*, but TCP isn't using it due to the window limitation.
+
+**Solutions:**
+
+1. **Increase TCP Window Size (Quick fix):**
+   ```bash
+   sysctl -w net.ipv4.tcp_rmem='4096 87380 67108864'  # 64MB max
+   sysctl -w net.ipv4.tcp_wmem='4096 65536 67108864'  # 64MB max
+   ```
+   This allows the window to scale up dynamically (RFC 7323 TCP Window Scaling).
+   
+   New calculation: `Max = 64MB / 0.15s = 3.4 Gbps` (closer to the available 10 Gbps).
+
+2. **Use a faster transfer tool (Better):**
+   - `bbcp` (Big Brother Copy): Custom protocol that opens multiple parallel TCP streams and handles congestion better over WAN.
+   - `perfsonar`: Network tuning tool that automatically adjusts window sizes and buffer for your specific latency.
+   - `rclone`: Transfer tool designed for cloud workflows, handles retries and multi-part uploads.
+
+3. **Enable TCP Fast Open + SACK (Modern):**
+   ```bash
+   sysctl -w net.ipv4.tcp_fastopen=1
+   sysctl -w net.ipv4.tcp_sack=1  # Selective Acknowledgment
+   ```
+
+4. **UDP-based alternatives:** For non-reliable-delivery systems, use QUIC (HTTP/3) or custom UDP, which don't have the ACK-window bottleneck.
+
+**Lesson:** WAN performance is fundamentally about RTT and window size, not raw bandwidth. A 10 Gbps link with 150ms latency can transfer ~3.4 Gbps max unless you increase the window.
+
+---
+
+**Q44. [L2] You're designing a microservices architecture with 50 services. Each service is dynamically deployed by Kubernetes, with IPs changing hourly. How do you enable service discovery so one service can reliably reach another without hardcoding IPs or DNS names?**
+
+> *What the interviewer is testing:* Service discovery patterns, DNS vs API-based discovery, microservices networking.
+
+**Answer:**
+There are three main service discovery approaches, each with tradeoffs:
+
+**1. DNS-Based Discovery (Traditional):**
+Kubernetes automatically registers each service in DNS: `my-service.default.svc.cluster.local` resolves to the service's cluster IP (virtual, stable).
+```
+Client → '`curl http://my-service:8080/api`' → Kubelet's DNS (CoreDNS) → Service ClusterIP → Round-robin load balance to Pod IPs
+```
+**Pros:** Simple, works with existing apps.
+**Cons:** DNS caching issues (Java caches DNS indefinitely), DNS TTL can cause stale endpoints, no realtime updates if a pod crashes mid-request.
+
+**2. API-Based Discovery (Service Mesh):**
+Istio/Linkerd intercepts all outbound traffic via sidecar proxies. The proxy dynamically queries the service registry (etcd) for live endpoint lists, updating in realtime as pods scale up/down.
+```
+Client Pod → Envoy sidecar (istio-proxy) → Query control plane (Pilot) for live endpoints → Route to Pod IP
+```
+**Pros:** Realtime, handles pod failures gracefully, circuit breaking, retries, mTLS.
+**Cons:** Complexity, 5-10% CPU overhead per pod, steep learning curve.
+
+**3. Hybrid (DNS + API):**
+Use DNS for initial discovery, but rely on service mesh sidecars for active health checking and load balancing.
+```
+DNS → ClusterIP → Endpoint controller updates live list → Sidecar proxy sees changes → Intelligent routing
+```
+
+**Recommendation for 50 microservices:**
+Start with **Kubernetes native DNS** (simplest, lowest overhead):
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+spec:
+  selector:
+    app: payment
+  ports:
+  - port: 8080
+    targetPort: 8080
+```
+
+Services call each other: `curl http://payment-service:8080/charge`. Kubernetes DNS resolves and load balances automatically.
+
+If you hit scaling issues (DNS TTL, pod crash recovery), adopt **Istio** for realtime discovery and traffic management.
+
+---
+
+**Q45. [L1] A security policy mandates that all outbound traffic from servers must be explicitly allowed. Currently, the VPC security groups allow all outbound traffic by default. How do you restrict outbound egress and test it safely?**
+
+> *What the interviewer is testing:* Egress filtering, zero-trust networking, security group rules.
+
+**Answer:**
+By default, AWS Security Groups **allow all outbound traffic** (egress rule `0.0.0.0:0` on all protocols). Restricting this follows the **principle of least privilege**.
+
+**Implementation:**
+
+1. **Remove default allow-all egress rule:**
+   ```
+   Current: Outbound Rule: All protocols, all ports, 0.0.0.0/0 ✓ ALLOW
+   Change to: Remove this rule
+   ```
+
+2. **Add explicit allow rules only for required destinations:**
+   ```
+   Outbound Rules:
+   - TCP 443 to 0.0.0.0/0 (HTTPS to external APIs)
+   - TCP 3306 to 10.0.2.0/24 (MySQL to internal DB subnet)
+   - TCP 53 to 8.8.8.8 (DNS to Google's nameserver)
+   - UDP 53 to 8.8.8.8 (DNS)
+   - Deny everything else (implicit or explicit)
+   ```
+
+3. **Test safely (Canary approach):**
+   a. Create a **test security group** with the new restrictive rules.
+   b. Launch a test EC2 instance with the new SG.
+   c. Verify from the test instance:
+      ```bash
+      curl https://api.example.com  # Should work (allowed)
+      curl http://malicious.site    # Should timeout (blocked)
+      nslookup google.com 8.8.8.8   # Should work (DNS allowed)
+      ping 1.1.1.1                  # Should timeout (ICMP denied)
+      ```
+   d. Check application logs: "DNS resolution works? Database connects? External API calls succeed?"
+   e. Once validated, apply the restrictive SG to production gradually (canary deploy).
+
+4. **Operational considerations:**
+   - Whitelist only what's needed; deny by default.
+   - For broad HTTPS (port 443), you can safely allow `0.0.0.0/0` (only ports used for client outbound connections).
+   - Use Network ACLs as a second layer if you distrust the security group rules.
+   - Monitor CloudTrail for unauthorized outbound attempts; create alarms for connection timeouts that might indicate blocked traffic.
+
+**AWS Recommendation:**
+Use a **Network Firewall** or **VPC Flow Logs + Athena** to baseline current traffic patterns, identify all outbound destinations actually used by applications, then implement Security Group rules to match.
+
+---
+
+**Q46. [L3] A data transfer between two AWS regions via the internet takes 10 seconds for a 100MB file (10 Mbps). You enable inter-region VPC peering, and the transfer completes in 0.1 seconds (10 Gbps). However, a large file transfer from within a VPC to an external S3 bucket in another region via the internet gateway bottlenecks at 100 Mbps. Why do VPC-to-VPC transfers saturate bandwidth while VPC-to-Internet transfers don't?**
+
+> *What the interviewer is testing:* AWS network architecture, inter-region connectivity, bandwidth vs latency.
+
+**Answer:**
+This illustrates the **fundamental difference** between AWS's internal backbone and the public internet.
+
+**VPC-to-VPC Peering (10 Gbps achievable):**
+- Traffic flows entirely over **AWS's private fiber backbone** (dedicated, optimized for high throughput).
+- No congestion from public internet traffic.
+- Low packet loss, consistent performance.
+- All bandwidth is available (no ISP throttling or carrier limits).
+
+**VPC-to-Internet Gateway to S3 (100 Mbps bottleneck):**
+- Traffic exits the VPC via the **Internet Gateway (IGW)**, traversing public internet to reach S3's edge endpoints.
+- S3 in other regions is accessed via public IP addresses (even though it's an AWS service).
+- **Bandwidth allocation:** AWS typically allocates 100 Mbps per EC2 instance for internet egress (per AWS documentation, N1/T2/T3 instances). This is *per instance*, not per VPC.
+- Once the instance exhausts its 100 Mbps allocation, throughput is capped, regardless of available physical bandwidth.
+
+**Why this asymmetry?**
+- **Inter-region VPC peering:** Traffic never leaves AWS's network. Uses dedicated peering connections optimized for high throughput.
+- **Internet traffic:** Traverses public internet infrastructure (ISPs, CDNs, exchange points), all carrying millions of other users' traffic. AWS soft-caps per-instance internet throughput to prevent DoS.
+
+**Solutions to increase VPC-to-S3 throughput:**
+
+1. **Use AWS S3 Transfer Acceleration** (leverages CloudFront edge locations):
+   ```
+   VPC → S3 TA endpoint (nearest CloudFront edge) → S3 (via AWS backbone)
+   ```
+   Can achieve ~1 Gbps for some use cases.
+
+2. **Create VPC Endpoint for S3** (Gateway endpoint):
+   ```
+   VPC → S3 VPC Endpoint → S3 (stays on AWS backbone, doesn't traverse IGW)
+   ```
+   This avoids the IGW bandwidth limitation and uses backbone; can achieve multi-Gbps.
+
+3. **Increase instance size or use multiple instances:**
+   - Larger instances (m5.2xlarge+) may have higher internet bandwidth allocations.
+   - Parallel transfers across multiple instances (each gets its own 100 Mbps quota).
+
+4. **Dedicated Network Connection (Direct Connect):**
+   - Expensive but guarantees dedicated bandwidth (1 Gbps, 10 Gbps, 100 Gbps).
+   - Bypasses public internet entirely; all traffic flows over AWS's private backbone.
+
+**Recommended for high-throughput S3 (same region or cross-region):**
+Use **S3 VPC Gateway Endpoint** (free, no data transfer charges) for all inter-region S3 access. It keeps traffic on the backbone and avoids the IGW bottleneck, achieving near-link-speed throughput.
