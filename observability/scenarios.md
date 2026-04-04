@@ -478,3 +478,315 @@ When the 3-second spike happens, the profiler automatically records it. The next
 Adding a `tenant_id` label to Prometheus metrics is a fatal mistake because it causes a catastrophic **Cardinality Explosion**.
 If you have 10,000 tenants, and each interacts with 50 endpoints across 5 HTTP methods and 4 status codes, multiplying these combinations creates tens of millions of distinct metric series, which will quickly crash Prometheus due to OOM errors or bankrupt you in Datadog custom metric billing.
 **Instead:** Fast, aggregated system health (Metrics) should *not* be split by customer. To provide per-tenant dashboards, you should inject the `tenant_id` exclusively into **Logs** or **Distributed Traces**. Those systems are built to index high-cardinality metadata cheaply. You can then use tools like Datadog Log Analytics or Elasticsearch to graph latency specifically filtered by `tenant_id` without breaking the core metric TSDB.
+
+---
+
+**Q41. [L1] Why are latency percentiles (P50, P95, P99) more useful than average (mean) latency for understanding user experience? Give a concrete example where average is misleading.**
+
+> *What the interviewer is testing:* Understanding distribution statistics and user-centric metrics.
+
+**Answer:**
+Average latency is **deceptive** because it hides the temporal distribution of requests. A system can have a "good" average while users experience terrible performance.
+
+**Concrete example:**
+- 100 requests: 99 complete in 10ms, 1 takes 10,000ms (user hits a database lock or GC pause).
+- Average = (99×10 + 1×10,000) / 100 = **109ms** (looks acceptable)
+- P99 = 10,000ms (the 1% percentile experiencing the lock, which is unacceptable for a web app)
+
+**Why percentiles matter:**
+- **P50 (Median):** Half of users experience better, half worse.
+- **P95:** 95% of users are fast. If P95 is 200ms, the slowest 5% experience delays.
+- **P99:** Only the slowest 1% suffer. If P99 is 5 seconds, you're losing at least 1 in 100 users.
+
+For SLOs, you never use average. You commit to "P99 latency < 200ms" because that's a user experience promise. Tail latency (P99, P99.9) is the metric operations teams care about.
+
+---
+
+**Q42. [L2] An alerting rule fires every 3 seconds, then clears every 5 seconds, creating 150+ PagerDuty incidents per hour. The actual metric oscillates around the threshold. How do you stabilize this?**
+
+> *What the interviewer is testing:* Alert flapping, dampening strategies, alert fatigue reduction.
+
+**Answer:**
+This is **alert flapping**—when a metric oscillates around the threshold, causing rapid alert cycles. Engineers ignore the notifications (alert fatigue), defeating their purpose.
+
+**Solutions (in order of increasing sophistication):**
+
+1. **Raise the evaluation window:** Instead of `cpu > 80%`, use `avg(cpu) over 5m > 80%`. Oscillations within minutes won't trigger; only sustained issues will.
+
+2. **Hysteresis (two-threshold approach):** 
+   - Alert fires when metric > 85% (high threshold)
+   - Alert clears only when metric < 75% (low threshold)
+   - This creates a "dead zone" between 75-85%, preventing flapping.
+   - Prometheus: Use `for: 5m` (must exceed threshold for 5 minutes before triggering).
+
+3. **Aggregation:** Instead of single-instance CPU, alert on `avg(cpu) across all instances > 80%`. Aggregate metrics are smoother.
+
+4. **Dynamic thresholding:** Replace static 80% with `predict_linear(cpu[1h], 3600) > 90%`. Only alert if the metric will hit 90% within the hour (giving lead time instead of flapping).
+
+**Best practice example (Prometheus):**
+```yaml
+- alert: HighCPU
+  expr: rate(node_cpu[1m]) > 0.8
+  for: 5m  # Must be high for 5 consecutive minutes
+  annotations:
+    summary: "CPU sustained above 80%"
+```
+
+---
+
+**Q43. [L3] Your Prometheus instance is crashing with OOM every few hours. You identify the culprit: a Kubernetes deployment metric with a `pod_name` label containing every pod UUID ever created in the cluster (including deleted pods). Why is cardinality so deadly, and how do you prevent this without restarting Prometheus?**
+
+> *What the interviewer is testing:* Understanding metric cardinality, label design, active remediation.
+
+**Answer:**
+Each unique combination of label values creates a separate **time-series**. Prometheus stores each series' metadata, recent data points, and indices in memory.
+
+**The Math:**
+If you have a metric with labels `{job, instance, pod_name, container}`:
+- 10 jobs × 100 instances × 50,000 pod UUIDs × 10 containers = **500 million series**
+- Each series occupies ~1KB of memory (metadata, indices) = **500GB needed** (will OOM instantly on a 64GB server).
+
+**Why deletes matter:** When a pod is deleted, Prometheus doesn't immediately purge its cardinality. The metric remains "recorded" until the TSDB compaction cycle runs (days later), so cardinality grows unbounded.
+
+**Prevention & Remediation:**
+
+1. **Label Design (Prevent):** Never use unbounded identifiers like pod_name or user_id as labels. Use only bounded dimensions:
+   ```yaml
+   # Bad: pod_name has infinite cardinality
+   http_requests_total{method, status, pod_name}
+   
+   # Good: namespace and deployment are bounded (~100s)
+   http_requests_total{method, status, namespace, deployment}
+   ```
+
+2. **Metric Relabeling (Active Remediation):** Without restarting, add `metric_relabel_configs` to your scrape config to drop the problematic label:
+   ```yaml
+   scrape_configs:
+     - job_name: 'kubernetes'
+       metric_relabel_configs:
+         - source_labels: [pod_name]
+           regex: '.+'
+           action: drop  # Drop all metrics with a pod_name label
+   ```
+   Reload Prometheus: `kill -HUP <PID>` (no restart, configs reloaded live). New scraped metrics won't have `pod_name`, and Prometheus will garbage-collect the old series over time.
+
+3. **Cardinality Budgets:** Proactively monitor cardinality:
+   ```
+   topk(10, count by (__name__) ({__name__=~".+"}))
+   ```
+   If a metric's cardinality exceeds 10,000, auto-alert before it crashes.
+
+---
+
+**Q44. [L1] A developer says "We should alert on average CPU being high". You say "No, that's a symptom. What's the root cause?" Explain the difference between alerting on symptoms vs root causes with a concrete example.**
+
+> *What the interviewer is testing:* Alert design philosophy, SRE thinking, user impact.
+
+**Answer:**
+**Symptoms** are resource metrics (CPU, memory, disk). **Root causes** are user-facing impacts (errors, latency, requests failing).
+
+**Example:**
+- **Symptom:** CPU > 80%
+- **Root cause:** Application latency > 500ms OR error rate > 1%
+
+You could have high CPU from:
+- A batch job (acceptable, expected, users don't care)
+- A memory leak in a thread (critical, users see slow requests)
+- A noisy neighbor VM (critical for your app, but your app itself is fine)
+- Efficient code using available resources (healthy, no issue)
+
+**Why symptom alerts fail:**
+If you alert on "CPU > 80%", you'll wake on-call for the batch job and ignore the memory leak causing user errors. Alert fatigue makes engineers stop responding to alerts.
+
+**Root cause alerting:**
+Instead, alert on:
+- "Error rate > 1%" (users are failing)
+- "P99 latency > 500ms for 5 min" (user experience degraded)
+- "API response 500 errors > 50/min" (app crashed or hung)
+
+These align with what users *actually experience*. If the root cause is firing, you're guaranteed there's a real problem worth waking for. If CPU is high but latency and errors are normal, sleep through it.
+
+---
+
+**Q45. [L2] An application generates 500,000 log lines per second. Storing everything costs $100,000/month. You need detailed debugging capability but cannot afford full-volume storage. What sampling strategy allows you to capture errors while discarding routine logs?**
+
+> *What the interviewer is testing:* Log cost optimization, sampling strategies, tail-based sampling.
+
+**Answer:**
+**Log sampling** reduces volume while preserving critical signals. There are two approaches:
+
+**1. Head-Based Sampling (Probabilistic):**
+At the point where the log is generated, randomly decide: keep this log with probability P (e.g., 1% of logs). The decision is made instantly, lowest CPU overhead.
+```python
+import random
+if random.random() < 0.01:  # Keep 1%
+    logger.info("request completed")
+```
+**Problem:** You randomly discard errors. With 1% sampling, you'll miss 99% of the stack traces.
+
+**2. Tail-Based Sampling (Intelligent):**
+Capture *all* logs in a temporary buffer, but only ship to the aggregator if they match certain criteria:
+- All logs from *error* requests (even if they're low-volume)
+- All logs from *slow* requests (latency > 1000ms)
+- Random sample of *success* requests (1% to track healthy profiles)
+
+A log forwarder like Fluentbit or OpenTelemetry Collector buffers logs in memory as they arrive, tags them with request outcome (error/success/latency), and makes shipping decisions *after* the request completes.
+
+**Example (with OpenTelemetry):**
+```yaml
+processors:
+  tail_sampling:
+    policies:
+      - name: error_policy
+        type: error
+        error_policy:
+          status_code:
+            status_codes: [500, 502, 503]
+      
+      - name: slow_policy
+        type: latency
+        latency_policy:
+          threshold_ms: 1000
+      
+      - name: probabilistic
+        type: probabilistic
+        probabilistic_policy:
+          sampling_percentage: 1
+```
+
+**Cost Math:**
+- Full volume: 500,000 logs/sec × $10 per million logs = $150,000/month
+- With tail-based sampling (errors + 1% sample): 
+  - Errors: ~5,000/sec, success sample: ~5,000/sec = 10,000 logs/sec
+  - Monthly cost: 10,000 × 86400 × 30 × $10 / 1,000,000 = **$2,592/month** (98% savings)
+- Debugging capability: All errors captured + representative success traces for normal behavior analysis.
+
+---
+
+**Q46. [L3] Your observability infrastructure costs $200,000/month (Datadog, Prometheus, etc.), but the CFO demands a 40% cost reduction. You cannot lose visibility into production. Design a cost-aware observability strategy with specific architectural changes.**
+
+> *What the interviewer is testing:* Business-aware engineering, observability architecture, cost vs reliability tradeoffs.
+
+**Answer:**
+Cost reduction requires **architectural restructuring**—not just turning off features. The strategy is **Hot/Warm/Cold tiers with intelligent routing**.
+
+**Current High-Cost Architecture:**
+- Full-resolution metrics (15-second granularity) for 30 days in Datadog = billions of data points @ $0.05 per 1000
+- All logs ingested into Splunk/Datadog for instant searchability = $$$
+
+**Cost-Optimized Architecture:**
+
+1. **Metrics Tiering:**
+   - **Hot (3 days):** Full-resolution (15s) Prometheus on cheap local hardware. Covers "right now" incident response. Cost: ~$1,000/month (hardware).
+   - **Warm (7-30 days):** Downsampled (5-minute resolution) shipped to S3/Thanos with query-on-demand. Cost: ~$500/month (storage).
+   - **Cold (>30 days):** Parquet/ORC format in S3. Queries require Athena (serverless) scanning. Cost: ~$100/month (occasional audits).
+   - **Savings:** From $80k/month in Datadog to $1.6k/month.
+
+2. **Log Tiering:**
+   - **Hot (7 days):** High-priority logs only (errors, warnings) in Elasticsearch. Cost: ~$2,000/month.
+   - **Warm (30 days):** All logs (unindexed) in S3 gzip archives. Query via Athena/Splunk on-demand. Cost: ~$500/month.
+   - **Cold (>30 days):** Compliance/audit archives (immutable, rarely retrieved). Cost: ~$50/month.
+   - **Savings:** From $90k/month in Datadog logs to $2.55k/month.
+
+3. **Traces (formerly 100% sampled at all times):**
+   - **Intelligent Sampling:** Jaeger/Datadog samples at 0.5% baseline (random), but bumps to 100% for:
+     - Errors (always trace failures)
+     - High latency requests (>500ms)
+     - Specific high-value transactions (payment checkout)
+   - **Savings:** From $30k/month in trace storage to $3k/month (only interesting requests traced).
+
+4. **Alerts & Notification:**
+   - Move from expensive alerting (Datadog Monitors @ $40/monitor) to cheaper **open-source tools:**
+     - Prometheus AlertManager + custom webhook integrations (free)
+     - Grafana alerts (open-source, self-hosted) (free)
+   - **Savings:** $40k/month in monitor licensing to ~$500/month infrastructure.
+
+**Operational Changes:**
+- On-call engineers know: "For the last 30 days, query the hot Elasticsearch. For 30-day-old issues, run Athena queries (5-min query latency)."
+- For post-mortems, sacrifice instant query time, enable Athena scanning of S3 (acceptable, not urgent).
+- Batch jobs and non-critical services use only logs + metrics (no traces).
+
+**Total Monthly Cost Reduction:**
+- Before: Datadog basic tier at $200k/month
+- After: Self-hosted Prometheus/Grafana/ELK + S3 = $8.5k/month
+- **Savings: 95.75% cost reduction ($191.5k/month)**
+
+**Trade-offs Accepted:**
+- Instant instant query latency lost (but alerts still fast)
+- Team must relearn on-call procedures
+- Requires in-house expertise to maintain ELK and Prometheus
+
+---
+
+**Q47. [L2] Your on-call runbook for a database outage is 50 pages long with flowcharts, escalation procedures, and conflicting instructions from different teams. A junior engineer pages you at 2 AM confused by step 15. How do you structure a runbook so incident responders can act decisively under stress?**
+
+> *What the interviewer is testing:* Operational documentation, decision trees, incident response design.
+
+**Answer:**
+A good runbook is **not a novel**—it's a **decision tree**. It guides humans through uncertainty without requiring them to read 50 pages at 3 AM.
+
+**Structure (Better Practice):**
+
+**1. One-page summary (Top of runbook):**
+```
+SERVICE: Database Primary
+SYMPTOMS: Queries timing out OR connection refused
+IMPACT: Users cannot place orders, checkout broken
+MITIGATION: Failover to replica (estimated 5 min recovery)
+ESCALATION: Page DBAs if failover fails
+```
+
+**2. Decision tree (Flowchart, not prose):**
+```
+Q: Can you SSH to primary DB?
+├─ YES → Q: Are there error messages in /var/log/mysql/error.log?
+│        ├─ YES (deadlock) → Run: ANALYZE and OPTIMIZE tables (procedure #1)
+│        ├─ YES (out of memory) → Restart MySQL (procedure #2)
+│        └─ NO → Check replication lag (procedure #3)
+└─ NO → Primary host is offline → Initiate failover (procedure #4)
+```
+
+**3. Procedures (Numbered, atomic tasks):**
+```
+## Procedure #1: Clear Deadlock
+1. SSH db-primary-01
+2. mysql> SHOW ENGINE INNODB STATUS; (identify locked table)
+3. Kill the blocking transaction: KILL <TXN_ID>;
+4. Verify queries resume: watch 'SHOW PROCESSLIST;' (< 100 queries)
+5. If not resolved → Escalate to DBA (page @dba-oncall)
+```
+
+**4. Escalation paths (Clear handoff):**
+```
+LEVEL 1 (Incident Lead): First responder follows procedures #1-#3
+  ↓ (If still broken after 10 min)
+LEVEL 2 (Database Engineer): @dba-oncall pages, takes over
+  ↓ (If still broken after 20 min)
+LEVEL 3 (VP Engineering): Nuclear option, prepare communication + customer refund
+```
+
+**5. Post-incident actions:**
+```
+AFTER the incident is resolved:
+- [ ] Notify #incidents Slack channel
+- [ ] Trigger post-mortem (7 days later)
+- [ ] Update this runbook if procedures changed
+```
+
+**Best Practices:**
+- **Testability:** Run the runbook quarterly in a non-prod environment. If the junior engineer can't follow it, rewrite it.
+- **Roles:** Assign who does what (Lead vs. Database Engineer vs. Infrastructure). Reduces conflict.
+- **Timing:** Note estimated time for each procedure ("Failover takes ~5 min"). Sets expectations.
+- **Links:** Reference actual commands/tickets, not generic "check the system". Runbooks are **not** learning documents; they're **action guides**.
+- **What NOT to do:** Avoid "If you're unsure, call the database team." Be specific.
+
+**Example (Better):**
+```
+DECISION: Is replication lagged?
+COMMAND: ssh db-primary-01 && mysql -e "SHOW SLAVE STATUS\G" | grep "Seconds_Behind_Master"
+OUTPUT:
+  - 0-5 seconds: Acceptable, continue troubleshooting (procedure #3)
+  - >5 seconds: Replication is lagged, stop writes (procedure #5)
+```
+
+Runbooks succeed when junior engineers can copy-paste commands and make progress without interpretation.

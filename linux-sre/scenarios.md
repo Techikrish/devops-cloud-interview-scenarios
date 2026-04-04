@@ -518,3 +518,198 @@ The shell relies on the **`$PATH`** environment variable, which is an ordered li
 To fix it, they must either:
 1. Move the binary into an authorized path: `sudo mv ~/Downloads/kubectl /usr/local/bin/` 
 2. Permanently add the Downloads directory to their path by appending `export PATH=$PATH:~/Downloads` to their `~/.bashrc` or `~/.zshrc` profile, so the shell learns to search there automatically.
+
+---
+
+**Q41. [L2] You need to run a long-lived background service that must automatically restart if it crashes. You also want to manage its lifecycle (start/stop/restart) from a single systemd unit file. How do you configure systemd for auto-restart, and what are the critical directives?**
+
+> *What the interviewer is testing:* Systemd service definition, restart policies, type directives.
+
+**Answer:**
+Modern Linux systems use **systemd** to manage services instead of SysVinit scripts. A systemd unit file (e.g., `/etc/systemd/system/myapp.service`) must configure restart behavior explicitly.
+
+Key directives:
+1. **Type=simple** (default): The process runs in the foreground. Systemd considers the service active when the process starts.
+2. **Type=forking**: The process daemonizes itself (old SysVinit behavior). Systemd waits for the parent to exit before considering it active.
+3. **Restart=on-failure**: Automatically restart if the process exits with a non-zero exit code.
+4. **RestartSec=5**: Wait 5 seconds between restart attempts to avoid restart loops.
+5. **StandardOutput=journal** and **StandardError=journal**: Capture all logs directly to journald (no separate log files needed).
+
+Example configuration:
+```ini
+[Unit]
+Description=My Critical Application
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/myapp
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then enable and start: `systemctl daemon-reload && systemctl enable myapp && systemctl start myapp`.
+
+---
+
+**Q42. [L1] You need to inspect the current state of a running process without attaching external debugging tools. What files in the `/proc` filesystem give you process information like memory usage, open file descriptors, and CPU affinity?**
+
+> *What the interviewer is testing:* Understanding /proc filesystem structure, process introspection.
+
+**Answer:**
+The Linux **`/proc` filesystem** exposes the kernel's data structures as text files, allowing deep process inspection without external tools.
+
+For a process with PID `1234`, key files are:
+- **`/proc/1234/status`**: Summary of memory usage (VmPeak, VmRSS, VmSwap), process state, UIDs, thread count, etc.
+- **`/proc/1234/stat`**: CPU time, process state (`S`=sleeping, `R`=running, `Z`=zombie), PPid, nice value.
+- **`/proc/1234/fd/`**: Directory listing all open file descriptors. `ls -la /proc/1234/fd/` shows which files/sockets the process has open.
+- **`/proc/1234/maps`**: Virtual memory map showing loaded libraries, heap, stack regions, and their permissions.
+- **`/proc/1234/limits`**: Current hard/soft limits (ulimits) for file descriptors, core dump size, CPU time, etc.
+- **`/proc/1234/cgroup`**: Which cgroups (namespaces and resource limits) the process belongs to.
+
+Quick example: `cat /proc/1234/status | grep VmRSS` shows exact resident memory used. `cat /proc/1234/limits` shows if file descriptor limits are exhausted.
+
+---
+
+**Q43. [L3] Explain how Linux Namespaces and Cgroups work together to isolate and limit container resources. Why does removing a container process not delete the cgroup, and what happens if you reuse the cgroup name?**
+
+> *What the interviewer is testing:* Container isolation fundamentals, kernel-level resource management.
+
+**Answer:**
+**Namespaces** and **Cgroups** are complementary isolation mechanisms:
+
+**Namespaces** isolate *visibility* (PID namespace hides other processes, network namespace creates a separate NIC, filesystem namespace provides a chroot-like view).
+**Cgroups** enforce *resource limits* (CPU shares, memory cap, I/O bandwidth, etc.).
+
+When a container starts, the container runtime (Docker/containerd):
+1. Creates new namespaces for the process: `unshare(CLONE_NEWPID | CLONE_NEWNET | ...)`
+2. Assigns the process to a cgroup: `/sys/fs/cgroup/memory/docker/<container-id>/` with `memory.limit_in_bytes=512M`
+3. The container process thinks it's PID 1 (due to PID namespace) but the host sees it as PID 4567.
+
+When the container process terminates, **the cgroup persists** because cgroups are kernel-managed resource accounting structures separate from process lifecycles. The kernel keeps tracking memory usage, I/O metrics, etc., even if the process exits. This allows inspecting historical resource consumption after a crash.
+
+**Reusing the same cgroup name:** If you spin up a new container and reuse the same cgroup path without cleaning up the old one, the new process joins the cgroup with the old memory limit still in place and metrics still aggregating. This can cause unexpected behavior (e.g., the old limit prevents the new container from starting). Container runtimes always clean up cgroups (or create unique names with container IDs) to prevent this collision.
+
+---
+
+**Q44. [L2] An application runs fine, but SELinux denies a critical system call with "Permission Denied" (avc denial). Standard Unix permissions show the file is readable. How do you diagnose and temporarily allow the access?**
+
+> *What the interviewer is testing:* Mandatory Access Control (MAC) vs Discretionary Access Control (DAC), SELinux policy debugging.
+
+**Answer:**
+SELinux is a **Mandatory Access Control (MAC)** layer that sits *above* traditional Unix permissions (DAC). Even if a file is `644`, SELinux can block access if the policy says the process's domain is not allowed.
+
+When a denial occurs:
+1. **Check the audit log:** `audit2why` or `grep AVC /var/log/audit/audit.log` shows the exact denial. Example:
+   ```
+   type=AVC msg=... avc: denied { read } for pid=1234 comm="apache" name="config.txt" scontext=system_u:system_r:httpd_t:s0 tcontext=staff_u:object_r:user_home_t:s0
+   ```
+   This shows `httpd_t` domain trying to read a `user_home_t` file—denied by policy.
+
+2. **Temporary fix (debug mode):** Set SELinux to **Permissive** mode for the domain:
+   ```bash
+   semanage permissive -a httpd_t
+   ```
+   This logs denials but allows the process to operate, helping identify which accesses are actually needed.
+
+3. **Permanent fix:** Either:
+   - Change the file's SELinux context: `chcon -t httpd_sys_rw_content_t /var/www/config.txt`
+   - Write a custom policy module using `audit2allow` to automatically generate rules from audit logs.
+
+---
+
+**Q45. [L1] Explain the difference between SIGTERM and SIGKILL. Why must applications handle SIGTERM gracefully before deployment, and what happens during Kubernetes pod termination?**
+
+> *What the interviewer is testing:* Process signals, graceful shutdown, orchestration lifecycle.
+
+**Answer:**
+**SIGTERM (signal 15):** A "polite request" to terminate. The process can catch it, perform cleanup (flush buffers, close connections), and exit cleanly.
+**SIGKILL (signal 9):** A "forced kill" that cannot be caught or ignored. The kernel immediately terminates the process, potentially leaving corrupted state.
+
+In production deployments (especially Kubernetes):
+1. When scaling down or rolling out updates, the orchestrator sends **SIGTERM** to the application (e.g., 30-second grace period).
+2. The application **must** catch SIGTERM and gracefully shutdown:
+   ```bash
+   trap 'graceful_shutdown' SIGTERM
+   ```
+3. During shutdown: close client connections, finish in-flight requests, flush logs, release resources.
+4. If the process doesn't exit cleanly within the grace period, Kubernetes sends **SIGKILL**, forcefully terminating it (potential data loss or corrupted state).
+
+Applications that don't handle SIGTERM risk:
+- Lost in-flight requests
+- Corrupted database transactions
+- Connection pool exhaustion (clients hang waiting for responses)
+
+Example: A web server catching SIGTERM stops accepting *new* connections but finishes serving existing requests before exiting.
+
+---
+
+**Q46. [L3] A database server shows 100% disk utilization on iostat, but random read latency is acceptable while sequential write latency spikes wildly. How do you distinguish between read bottlenecks and write bottlenecks, and what tools reveal the root cause?**
+
+> *What the interviewer is testing:* Advanced I/O profiling, disk subsystem diagnostics, queue depth.
+
+**Answer:**
+Disk latency has two distinct bottlenecks: **read latency** (affecting query performance) and **write latency** (affecting commits/fsync). They require different tools to diagnose.
+
+**Tool 1: iostat -x 1** shows:
+- `r/s` and `w/s`: Read and write operations per second (independently measured).
+- `rareq-sz` and `wareq-sz`: Average request sizes (small vs large).
+- `r_await` and `w_await`: Average latency for reads and writes (in ms).
+- `svctm`: Service time (how long the disk takes to serve one request).
+- `%util`: Percentage of time the disk is busy (100% = fully saturated).
+
+If `r_await` is 2ms but `w_await` is 500ms, writes are the bottleneck, not reads.
+
+**Tool 2: blktrace + blkparse** captures every disk I/O operation:
+```bash
+blktrace -d /dev/sda -o - | blkparse -i -
+```
+Output shows timestamp, operation type (R/W), block address, size, queue depth, and latency for each I/O. You can see if writes are getting stuck behind a large read or being reordered by the scheduler.
+
+**Root causes:**
+- High write latency + queue depth > 1: Disk controller or SSD firmware throttling writes (e.g., NAND garbage collection).
+- High write latency + queue depth = 1: Single slow write (e.g., journal flush to slow media or encryption overhead).
+- Random writes slower than sequential: RAID write-back cache eviction or lack of RAID optimization for random workloads.
+
+---
+
+**Q47. [L2] SSH currently uses password authentication for access to production servers. Describe a certificate-based SSH authentication system for managing access to 1000+ servers without relying on password distribution or key rotation complexity.**
+
+> *What the interviewer is testing:* SSH security architecture, certificate-based auth, key management at scale.
+
+**Answer:**
+**Certificate-based SSH** (using OpenSSH certificates) eliminates password management and simplifies key rotation across large deployments.
+
+**Architecture:**
+1. **CA Setup:** Designate a secure certificate authority machine that signs user and host SSH keys. Generate a CA key pair:
+   ```bash
+   ssh-keygen -t rsa -f /path/to/ca/ssh_ca
+   ```
+
+2. **User Authentication:** Instead of distributing individual keys, users request a signed certificate:
+   - User generates their personal key: `ssh-keygen -t rsa -f ~/.ssh/id_rsa`
+   - User submits their public key to the CA (via secure API or admin approval workflow)
+   - CA signs it with a time-limited validity: `ssh-keygen -s /path/to/ca/ssh_ca -I user@example.com -n username -V +52w ~/.ssh/id_rsa.pub`
+   - User receives a `~/.ssh/id_rsa-cert.pub` valid for 52 weeks
+   - User connects: `ssh -i ~/.ssh/id_rsa user@production-server`
+
+3. **Server Configuration:** Add to `/etc/ssh/sshd_config` on all 1000 servers:
+   ```
+   TrustedUserCAKeys /etc/ssh/user_ca.pub
+   HostKey /etc/ssh/ssh_host_rsa_key
+   HostCertificate /etc/ssh/ssh_host_rsa_key-cert.pub
+   ```
+
+4. **Benefits:**
+   - No password distribution or memorization
+   - Automatic expiration (no need to revoke individual keys; certificates naturally expire)
+   - Centralized revocation list (CRL) if needed
+   - Audit trail: Each certificate embeds username, timestamp, and approval details
+   - Zero-trust: Revoke CA instantly, all certificates become invalid without manual key cleanup
+
+**Operational Scale:** With 1000 servers, update `/etc/ssh/user_ca.pub` once on all servers (via configuration management like Ansible), and cert-based auth works network-wide without touching private keys.
