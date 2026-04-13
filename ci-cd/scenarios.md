@@ -941,4 +941,372 @@ Because ArgoCD aggressively compares Git to the altered live cluster, it falsely
 
 ---
 
+## 🔐 Supply Chain Security & Advanced CI/CD
+
+---
+
+**Q81. [L3] Your security team discovers that the Python package `requests` used in your build was silently replaced in PyPI with a malicious version via a "dependency confusion" attack. No one noticed for 2 weeks because the version number was valid. How do you architect your CI pipeline to prevent this class of attack permanently?**
+
+> *What the interviewer is testing:* Dependency integrity verification, private package mirrors, hash pinning.
+
+**Answer:**
+This is a **dependency confusion** or **typosquatting** supply chain attack. Three layers of defence are required:
+
+1. **Hash Pinning:** Use `pip install --require-hashes -r requirements.txt`. Each package entry in `requirements.txt` contains its expected `sha256` hash. If the file downloaded from PyPI doesn't match the exact hash, pip aborts the build immediately.
+2. **Private Mirror / Allowlist:** Configure your CI to pull packages exclusively from an **internal Artifactory or AWS CodeArtifact** repository, not directly from the public internet. Every package entering that mirror is scanned and approved by the security team once.
+3. **SBOM + CVE Scanning:** Generate a Software Bill of Materials (SBOM) via `syft` on every build and scan it with `grype`. Any package that wasn't in the SBOM last build triggers an alert requiring human review.
+
+---
+
+**Q82. [L2] Your team runs `terraform plan` inside a GitHub Actions workflow. You notice that the plan output printed in the CI logs exposes the full contents of a secret stored in AWS Secrets Manager (because a developer added `output "db_password" { value = data.aws_secretsmanager_secret_version.db.secret_string }`). How do you prevent secret exfiltration via plan output?**
+
+> *What the interviewer is testing:* Terraform sensitive outputs, CI log masking, least-privilege planning.
+
+**Answer:**
+Three controls must work together:
+
+1. **Mark outputs sensitive in Terraform:** `output "db_password" { value = "..." sensitive = true }`. Terraform will redact its value in plan output with `(sensitive value)`.
+2. **Use a read-only IAM role for `plan` jobs** — the plan role has permissions to *read* state but not `secretsmanager:GetSecretValue`. This means the plan step never even retrieves the plaintext secret.
+3. **Scrub logs in CI:** GitHub Actions allows adding secrets to the masked list dynamically: `echo "::add-mask::$SECRET_VALUE"`. Any occurrence of that string in subsequent log output is replaced with `***`.
+
+---
+
+**Q83. [L2] A new SRE joins and notices that every CI pipeline in the organisation lacks any visibility — there are no dashboards showing average build time trends, failure rates, or queue wait times. How do you instrument your CI/CD platform to gain this observability?**
+
+> *What the interviewer is testing:* CI pipeline observability, DORA metrics pipeline, OpenTelemetry for CI.
+
+**Answer:**
+Most CI systems emit webhook events on job start, completion, and failure. The observability stack is built on top:
+
+1. **Webhook → Event Bus:** Configure GitHub/GitLab webhooks to push events to an SQS queue or Kafka topic.
+2. **OpenTelemetry Spans:** Tools like `otel-cicd` or Honeycomb's CI integration produce an OTEL trace per pipeline run, with child spans per job and step. This gives end-to-end latency decomposition.
+3. **DORA Dashboard in Grafana:** Use the Four Keys project (open-sourced by Google DORA) to calculate deployment frequency, lead time, change failure rate and MTTR from the event stream, rendered as Grafana panels.
+4. **Alerts:** Alert on P95 queue wait time exceeding 5 minutes (runner starvation), or build success rate dropping below 90% in a rolling 1-hour window.
+
+---
+
+**Q84. [L3] You maintain a microservices platform where 200 services each have their own independent release cadence. A shared authentication library has a critical CVE patched. You need all 200 services to pick up the new library version within 24 hours. How do you automate this across your entire organisation without creating 200 manual PRs?**
+
+> *What the interviewer is testing:* Automated dependency update bots, Renovate/Dependabot at scale.
+
+**Answer:**
+Use **Renovate Bot** configured at the organisation level rather than per-repository:
+
+1. **Org-wide Renovate config** (`renovate.json` in a central `github-org/.github` repository): Set `"packageRules"` to auto-merge patch updates for internal libraries, and add a `"schedule"` to batch runs nightly.
+2. When the CVE patch is released as version `2.1.1`, Renovate automatically opens a PR in all 200 repositories updating the lockfile. PRs that pass CI are auto-merged within minutes.
+3. For emergency CVEs, trigger Renovate forcefully via API: `POST /api/repos/{repo}/trigger` — Renovate re-runs immediately, ignoring the schedule.
+4. Track adoption via a **Dependency Dashboard** issue that Renovate auto-maintains in each repo, showing pending vs merged update PRs.
+
+---
+
+**Q85. [L2] Your GitHub Actions workflow is taking 18 minutes because it uploads a 4GB test artifact to GitHub Artifacts storage after every run, even for PRs that fail. How do you reduce pipeline cost and duration with minimal code changes?**
+
+> *What the interviewer is testing:* Conditional artifact uploads, artifact retention policies.
+
+**Answer:**
+Two immediate improvements:
+
+1. **Conditional upload:** Only upload artifacts when the job actually passes or when specifically triggered on `main`:
+```yaml
+- uses: actions/upload-artifact@v4
+  if: success() && github.ref == 'refs/heads/main'
+  with:
+    name: test-results
+    path: ./results/
+    retention-days: 7
+```
+2. **Reduce artifact size:** Archive only the failed test reports, not the entire output directory. For a 4 GB binary artifact, push it to S3 directly from the workflow instead of GitHub Artifacts storage — it's 10× cheaper and not subject to GitHub's storage quotas.
+3. Set `retention-days: 7` on all artifacts to prevent indefinite storage accumulation.
+
+---
+
+**Q86. [L3] Your organisation transitions from Jenkins to GitHub Actions. During migration, some teams leave their old Jenkins jobs running in parallel "just in case." Six months later, production deployments are happening from both systems simultaneously, causing race conditions. How do you enforce a clean cut-over?**
+
+> *What the interviewer is testing:* Deployment locks, migration governance, single source of deployment truth.
+
+**Answer:**
+1. **Deployment Locks:** Introduce a deployment lock in the state store (DynamoDB table or Redis). Both Jenkins and GitHub Actions jobs must acquire the lock before deploying. This prevents simultaneous deployments regardless of source.
+2. **Inventory and disable:** Script a Jenkins API query to list all active jobs: `curl -s http://jenkins/api/json?tree=jobs[name,color]`. Disable any job whose name maps to a service that has migrated.
+3. **Governance gate:** Add a policy rule (via OPA or a custom GitHub App) that rejects any deployment token request from Jenkins service accounts after a cut-off date.
+4. **Audit trail:** Send all deployment events (from both systems) to a central audit log (S3 + Athena). A weekly report highlights any Jenkins deployments still occurring, so the platform team can chase the owning team.
+
+---
+
+**Q87. [L2] A developer on your team commits a 500 MB binary model file directly into the Git repository. The clone time for your monorepo is now 45 minutes. How do you remove it without losing history and prevent it from ever happening again?**
+
+> *What the interviewer is testing:* Git LFS, `git filter-repo`, pre-receive hooks.
+
+**Answer:**
+**Immediate cleanup:**
+```bash
+git filter-repo --path models/big_model.bin --invert-paths
+git push --force --all
+```
+This rewrites history to completely remove the file from every commit. All team members must re-clone or run `git fetch --all && git reset --hard origin/main`.
+
+**Long-term prevention — two layers:**
+1. **Git LFS:** Move all binary assets to Git LFS (`git lfs track "*.bin" "*.pkl"`). LFS stores a small pointer in Git, and the actual binary lives in LFS storage (S3). Clone remains fast.
+2. **Pre-receive hook (server side):** Configure the GitHub/GitLab server-side hook to reject any push where a single file exceeds 50 MB without also updating `.gitattributes` to track it with LFS.
+
+---
+
+**Q88. [L3] Your CI/CD pipeline deploys directly to production on every merge to `main`. One Friday afternoon, a developer merges a PR and goes offline. The deployment silently fails halfway through — 30% of pods are running new code, 70% are running old code. There are no automated rollback hooks. How do you recover, and how do you prevent this situation architecturally?**
+
+> *What the interviewer is testing:* Deployment readiness, automated rollback, on-call accountability.
+
+**Answer:**
+**Immediate recovery:**
+- Identify current state: `kubectl rollout status deployment/api` — if `Progressing` is stuck, the rollout is hanging.
+- Manually roll back: `kubectl rollout undo deployment/api` — Kubernetes reverts to the previous ReplicaSet revision immediately. Verify with `kubectl rollout history deployment/api`.
+
+**Architectural prevention:**
+1. **`--atomic` on Helm, or rollout analysis on Argo Rollouts** — if the deployment does not reach 100% healthy within a timeout, it automatically rolls back.
+2. **Deployment freeze rules:** Block merges to `main` after 3 PM on Fridays via a GitHub branch protection check that queries the current time. Simple but highly effective.
+3. **Require on-call acknowledgement:** The pipeline sends a Slack message with "Deployment starting, confirm you're watching" and waits 60 seconds for a reaction emoji before proceeding. If no reaction, the pipeline pauses and pages on-call.
+
+---
+
+**Q89. [L2] You are asked to implement a CI check that enforces conventional commit message format (`feat:`, `fix:`, `chore:`, etc.) across all repositories. How do you enforce this both locally and in the CI pipeline?**
+
+> *What the interviewer is testing:* Commit linting, pre-commit hooks, CI policy enforcement.
+
+**Answer:**
+**Local enforcement (pre-commit):**
+Add `commitlint` to the repo with `husky`:
+```bash
+npm install --save-dev @commitlint/cli @commitlint/config-conventional husky
+npx husky add .husky/commit-msg 'npx --no -- commitlint --edit "$1"'
+```
+A commit with message `"updated stuff"` is now rejected locally with a clear error message.
+
+**CI enforcement (catch bypasses):**
+Developers can bypass pre-commit hooks with `git commit --no-verify`. Add a CI job:
+```yaml
+- name: Lint commit messages
+  run: npx commitlint --from ${{ github.event.pull_request.base.sha }} --to ${{ github.event.pull_request.head.sha }} --verbose
+```
+This validates every commit in the PR diff. The PR cannot merge until all commits comply. Combine with branch protection to make this check required.
+
+---
+
+**Q90. [L3] Your infrastructure team uses Terraform Cloud for remote state and applies. In CI, developers run `terraform plan` on every PR. You discover that two developers' PRs simultaneously modified the same resource — when both were merged, the second apply overwrote the first silently. What mechanism prevents this Terraform race condition?**
+
+> *What the interviewer is testing:* Terraform state locking, Terraform Cloud run queuing.
+
+**Answer:**
+This race condition is prevented by **state locking**. Terraform backend implementations (S3+DynamoDB, Terraform Cloud, etc.) acquire an exclusive lock on the state file before any `apply` operation. If a second `apply` tries to run while the first holds the lock, it fails immediately with a `state lock` error rather than proceeding.
+
+The underlying issue here is that both PRs passed `plan` independently (with accurate plans), but the second `apply` did not re-plan after the first apply changed the state. Terraform Cloud's native solution is **Run Queuing** — applies are serialised per workspace. The second run queues and then re-plans against the updated state before applying, so it sees the changes already made by the first apply and only does the diff required.
+
+For critical workspaces, enable `plan and apply` mode with manual confirmation to add a human gate before each apply.
+
+---
+
+**Q91. [L2] You need to implement a CI/CD pipeline for a machine learning model — not just the application code, but the model training, evaluation, and registration steps. How does an ML pipeline differ from a standard software CI/CD pipeline?**
+
+> *What the interviewer is testing:* MLOps, model versioning, training as a CI stage.
+
+**Answer:**
+ML pipelines introduce three concerns that don't exist in standard pipelines:
+
+| Concern | Standard CI/CD | ML Pipeline |
+|---|---|---|
+| **Artefact** | Docker image, JAR | Trained model weights (GB-scale) |
+| **Test** | Unit/integration tests | Model evaluation metrics (accuracy, F1, latency) |
+| **Versioning** | Git SHA | Model registry (MLflow, SageMaker Model Registry) |
+
+The ML CI pipeline stages are:
+1. **Data validation** — check that the training dataset schema and statistics match expectations (Great Expectations).
+2. **Training** — run training job (SageMaker, Vertex AI, or GPU runner).
+3. **Evaluation gate** — compare new model's metrics against the current production model. Block promotion if accuracy degrades >2%.
+4. **Model registration** — push to model registry with tags, training run ID, and dataset hash.
+5. **Deployment** — update the serving endpoint (canary rollout), monitor for prediction drift.
+
+---
+
+**Q92. [L2] Your team uses ArgoCD for GitOps. A hotfix needs to go to production in under 10 minutes, but the normal process requires a PR, review, and merge. The change is a single environment variable. What is the safest way to fast-track this without bypassing GitOps principles?**
+
+> *What the interviewer is testing:* GitOps emergency process, ArgoCD manual sync, temporary sync windows.
+
+**Answer:**
+GitOps does not mean you can't move fast — it means Git is always the source of truth.
+
+**Fast-track process:**
+1. **Direct push to a `hotfix/*` branch** by a senior engineer with production write permission (bypassing the standard review requirement, which should be allowed in documented emergency runbooks).
+2. **Open a PR immediately** (even simultaneously) so the change is reviewed asynchronously within the hour.
+3. In ArgoCD, set a **manual sync** on the app pointing to the hotfix branch: `argocd app set myapp --revision hotfix/env-fix && argocd app sync myapp`. Production is updated within minutes directly from Git.
+4. After the main PR merges, revert the app to track `main`: `argocd app set myapp --revision main`.
+
+The key: Git still recorded every change with author and timestamp. The audit trail is intact.
+
+---
+
+**Q93. [L3] You run a SaaS platform and your enterprise customers require a "private build" of your software — compiled from source with their specific config, available only in their VPC, with a signed SBOM. How do you architect a multi-tenant CI/CD pipeline that produces isolated, customer-specific builds?**
+
+> *What the interviewer is testing:* Multi-tenant CI, isolated build environments, SBOM generation.
+
+**Answer:**
+The architecture uses **build isolation per tenant**:
+
+1. **Isolated build namespaces:** Each tenant gets a dedicated Kubernetes namespace or AWS CodeBuild project. Builds never share storage, network, or compute with another tenant.
+2. **Tenant config injection:** A secure parameter store (AWS Secrets Manager) holds per-tenant config. The CI job assumes a tenant-specific IAM role that can only access that tenant's parameters.
+3. **Deterministic builds:** The source code commit SHA is pinned at trigger time. The same SHA produces bitwise-identical output for the same tenant config — verifiable with checksums.
+4. **SBOM generation:** After each build, `syft` generates a CycloneDX SBOM. This is signed with `cosign` using a tenant-specific private key and stored in their private S3 bucket.
+5. **Delivery to VPC:** The signed image is pushed to a customer-private ECR repository with cross-account pull access granted only to their AWS account ID.
+
+---
+
+**Q94. [L2] Half of your engineering team works on Windows laptops and half on macOS. Your shell scripts in CI keep failing on Windows runners because of line ending issues (`\r\n` vs `\n`) and path separator differences. How do you make your CI pipelines platform-agnostic?**
+
+> *What the interviewer is testing:* Cross-platform CI, `.gitattributes`, containerised CI builds.
+
+**Answer:**
+**Root cause:** Windows uses CRLF (`\r\n`) line endings; Linux/macOS use LF (`\n`). Shell scripts with `\r` characters fail silently or with cryptic errors on Linux runners.
+
+**Solutions (layered):**
+1. **`.gitattributes` normalisation:** Add `*.sh text eol=lf` and `*.bat text eol=crlf` to force correct line endings in the repo regardless of developer OS.
+2. **Containerise the CI build:** Run all CI jobs inside a Linux Docker container (`runs-on: ubuntu-latest` with a Docker executor). Windows developers run the same container locally via Docker Desktop. The environment is identical everywhere.
+3. **Replace shell scripts with Python or a task runner (Makefile / Taskfile):** Python handles path separators with `pathlib.Path` natively. Taskfile (`go-task`) has explicit cross-platform task definitions.
+4. **Use `#!/usr/bin/env bash` consistently** and validate scripts with `shellcheck` in CI to catch portability issues.
+
+---
+
+**Q95. [L3] Your pipeline deploys to Kubernetes using `kubectl apply -f manifests/`. A colleague points out that no one validates the YAML before it hits the cluster — a typo in a resource limit field goes undetected until the pod fails to schedule. How do you add static validation to the pipeline?**
+
+> *What the interviewer is testing:* Kubernetes manifest validation, kubeconform, OPA/Conftest policy gates.
+
+**Answer:**
+Add a dedicated **manifest validation stage** before any `kubectl apply`:
+
+1. **Schema validation with `kubeconform`:**
+```bash
+kubeconform -strict -kubernetes-version 1.30.0 manifests/
+```
+This validates every field against the official Kubernetes OpenAPI schema. A wrong `resource.limits.memory: "512Mi"` (note the wrong field path) fails immediately.
+
+2. **Policy validation with `conftest` (OPA):**
+Write Rego policies enforcing your standards:
+```rego
+deny[msg] {
+  input.kind == "Deployment"
+  not input.spec.template.spec.containers[_].resources.limits
+  msg := "All containers must have resource limits"
+}
+```
+Run: `conftest test manifests/`. This catches policy violations the schema alone can't catch.
+
+3. **Dry-run against a real cluster:** `kubectl apply --dry-run=server -f manifests/` sends the manifest to the API server for server-side validation without creating any resources. This catches admission webhook rejections too.
+
+---
+
+**Q96. [L2] Your CI pipeline needs to run database integration tests against a PostgreSQL database, but spinning up a full RDS instance for every PR is too slow and expensive. What is the correct pattern for fast, isolated database tests in CI?**
+
+> *What the interviewer is testing:* Testcontainers, service containers, database-per-test isolation.
+
+**Answer:**
+Use **Testcontainers** or CI service containers — not a shared or cloud-hosted database:
+
+**GitHub Actions service container approach:**
+```yaml
+services:
+  postgres:
+    image: postgres:16-alpine
+    env:
+      POSTGRES_PASSWORD: ci_pass
+      POSTGRES_DB: test_db
+    options: >-
+      --health-cmd "pg_isready -U postgres"
+      --health-interval 5s
+      --health-timeout 3s
+      --health-retries 10
+```
+This spins up a fresh, isolated PostgreSQL container for each job using Docker networking, available at `localhost:5432`. The container is destroyed after the job. No shared state, no cost.
+
+**For even more isolation:** Use Testcontainers library within your test code. Each test class can start its own transient PostgreSQL container with a randomised schema, ensuring zero test interference even when parallelised.
+
+---
+
+**Q97. [L3] You implement a full GitOps pipeline where ArgoCD manages production. A developer accidentally pushes a Kubernetes deployment with `replicas: 0` to the GitOps repository. ArgoCD syncs it, silently taking down the entire service. How do you add a policy gate that prevents zero-replica deployments from ever reaching the GitOps repository?**
+
+> *What the interviewer is testing:* Pre-merge policy gates, Conftest in CI, OPA/Kyverno at admission.
+
+**Answer:**
+Two layers of defence — one at the Git level, one at the cluster level:
+
+**Layer 1 — CI policy gate on PR:**
+In the CI pipeline that validates the GitOps repo, add a `conftest` check:
+```rego
+deny[msg] {
+  input.kind == "Deployment"
+  input.spec.replicas == 0
+  msg := sprintf("Deployment %v has replicas=0 which would cause an outage", [input.metadata.name])
+}
+```
+Run `conftest test` on every PR diff. The PR is blocked from merging until this passes.
+
+**Layer 2 — Admission controller in the cluster:**
+Install a Kyverno policy as a final defence:
+```yaml
+validate:
+  message: "Replica count must be >= 1 for non-maintenance deployments"
+  pattern:
+    spec:
+      replicas: ">=1"
+```
+Even if the Git gate is bypassed, the Kubernetes API server rejects the manifest. ArgoCD sync fails with a clear error message, and the service remains unaffected.
+
+---
+
+**Q98. [L2] Your team frequently accidentally breaks the `staging` environment because developers merge half-finished features under feature flags, but the flags are never cleaned up. Staging accumulates stale flag state and begins behaving differently from production. How do you bring hygiene to feature flag management in your CI/CD process?**
+
+> *What the interviewer is testing:* Feature flag lifecycle, automated flag auditing.
+
+**Answer:**
+Feature flag rot is a process problem, not just a tooling one:
+
+1. **Expiry dates on flags:** Require every flag created via your flag management tool (LaunchDarkly, Unleash) to have an explicit expiry date. After that date, the platform automatically disables the flag and creates a Jira ticket to remove the code.
+2. **Flag-removal PR as part of the release process:** Add a pipeline step that checks for flags that have been at 100% rollout for >7 days and opens an automated PR removing the flag and its conditional branch.
+3. **Staging flag parity check:** Add a CI job that compares the flags enabled in staging vs production. Any flag enabled in staging but not production that is older than 2 weeks triggers a Slack alert to the owning team.
+4. **Clean staging on demand:** Script a monthly staging environment reset — tear down and recreate from the infrastructure-as-code template, getting a clean flag state matching the IaC defaults.
+
+---
+
+**Q99. [L2] You need to enforce that every Docker image pushed to your internal container registry has been scanned for CVEs and has zero Critical severity vulnerabilities. How do you implement this as a hard gate in the CI pipeline and in the registry itself?**
+
+> *What the interviewer is testing:* Container image scanning, registry admission controls, Trivy or Grype in CI.
+
+**Answer:**
+**CI pipeline gate:**
+```yaml
+- name: Scan image for CVEs
+  run: |
+    trivy image --exit-code 1 --severity CRITICAL \
+      --ignore-unfixed \
+      ${{ env.IMAGE_TAG }}
+```
+`--exit-code 1` makes the job fail if any unfixed Critical CVEs are found. `--ignore-unfixed` skips CVEs where no upstream patch yet exists (reduces noise).
+
+**Registry-level enforcement:**
+Configure the registry (ECR, Harbor, or Artifactory) to enforce a scan policy:
+- **ECR:** Enable **Enhanced Scanning** (powered by Inspector). Set a lifecycle policy to deny pull of images tagged `:latest` that have Critical findings.
+- **Harbor:** Enable the **Interrogation Service** with Trivy. Set a project-level rule: "Prevent vulnerable images from running" at Critical threshold. Images failing the gate cannot be pulled by Kubernetes — the `imagePullPolicy` fails, preventing deployment.
+
+---
+
+**Q100. [L3] Six months after migrating 80 microservices to GitHub Actions, you realise the total GitHub Actions spend has tripled compared to your old Jenkins setup. An audit shows most workflows run on `ubuntu-latest` GitHub-hosted runners. What strategies do you apply to systematically reduce costs without slowing down developer feedback loops?**
+
+> *What the interviewer is testing:* CI cost optimisation, runner right-sizing, caching strategy, job concurrency tuning.
+
+**Answer:**
+A systematic cost reduction framework:
+
+1. **Identify top spenders:** GitHub's billing API exposes per-workflow minute usage. Export it and sort by cost. Focus optimisation on the top 10 workflows consuming 80% of spend.
+2. **Self-hosted runners for heavy jobs:** Migrate compilation and Docker build jobs to spot EC2 instances (via Actions Runner Controller). Cost drops by ~70% for compute-heavy tasks.
+3. **Aggressive dependency caching:** Calculate cache hit rates (GitHub shows this in each `actions/cache` step summary). A 30% cache hit rate means 70% of runs are downloading packages from scratch. Fix the cache key to be more stable.
+4. **Cancel redundant runs:** Use `concurrency` groups with `cancel-in-progress: true`. If a developer pushes twice in 30 seconds, the first run is cancelled immediately.
+5. **Step-level parallelism:** Replace sequential test steps with a build matrix, running tests in 4 parallel jobs. Total wall-clock time drops 4× but total minutes drop ~20% (faster = less idle time on expensive runners).
+6. **Right-size runners:** Jobs that only run shell scripts don't need a 4-CPU runner. Use `runs-on: ubuntu-latest` (2 vCPU) for light jobs and `runs-on: [self-hosted, large]` only for heavy jobs.
+
+---
+
 *More CI/CD scenarios added periodically. PRs welcome.*
