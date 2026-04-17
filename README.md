@@ -1,6 +1,6 @@
 # 🚀 DevOps & Cloud — Scenario-Based Interview Questions
 
-> **730+ real-world scenario questions with plain-language answers** — covering Kubernetes, AWS, CI/CD, Terraform, Docker, Linux/SRE, Observability, Networking, and Security.
+> **750 real-world scenario questions with plain-language answers** — covering Kubernetes, AWS, CI/CD, Terraform, Docker, Linux/SRE, Observability, Networking, and Security.
 
 This repo was built as a study companion for DevOps and Cloud engineers preparing for interviews at all levels. The focus is on **scenario-based questions** — the kind where an interviewer describes a real situation and asks *"what would you do?"* — because that's how mid-to-senior interviews actually work.
 
@@ -15,7 +15,7 @@ devops-cloud-interview-scenarios/
 ├── ☸️ kubernetes/scenarios.md          150 questions
 ├── ☁️ aws/scenarios.md                 120 questions
 ├── 🔄 ci-cd/scenarios.md               100 questions
-├── 🏗️ terraform/scenarios.md           60 questions
+├── 🏗️ terraform/scenarios.md           80 questions
 ├── 🐳 docker/scenarios.md              80 questions
 ├── 🐧 linux-sre/scenarios.md           47 questions
 ├── 📊 observability/scenarios.md       47 questions
@@ -35,7 +35,7 @@ devops-cloud-interview-scenarios/
 | ☸️ [Kubernetes](./kubernetes/scenarios.md) | Container orchestration, pod debugging, deployments, networking | 150 |
 | ☁️ [AWS](./aws/scenarios.md) | EC2, S3, RDS, IAM, Networking, Cost Optimization | 120 |
 | 🔄 [CI/CD](./ci-cd/scenarios.md) | Pipelines, GitOps, deployments, testing, secret management | 100 |
-| 🏗️ [Terraform](./terraform/scenarios.md) | State management, modules, locking, imports, best practices | 60 |
+| 🏗️ [Terraform](./terraform/scenarios.md) | State management, modules, locking, imports, best practices | 80 |
 | 🐳 [Docker](./docker/scenarios.md) | Images, containers, networking, multi-stage builds, security | 80 |
 | 🐧 [Linux / SRE](./linux-sre/scenarios.md) | System administration, performance tuning, incident response | 47 |
 | 📊 [Observability](./observability/scenarios.md) | Monitoring, logging, metrics, tracing, alerting | 47 |
