@@ -30,6 +30,7 @@ jobs:
             mkdir -p docs/$domain
             cp $domain/scenarios.md docs/$domain/scenarios.md
           done
+          rm .gitignore
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
