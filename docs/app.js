@@ -192,25 +192,31 @@ function parseMarkdown(md, domainId) {
 
       // look ahead
       i++;
-      // interviewer note
-      if (i < lines.length && lines[i].startsWith('> *What the interviewer')) {
-        note = lines[i].replace(/^> \*/, '').replace(/\*$/, '').trim();
-        i++;
-      }
-      // blank lines
-      while (i < lines.length && lines[i].trim() === '') i++;
-
-      // **Answer:** line
-      if (i < lines.length && lines[i].match(/^\*\*Answer:\*\*\s*(.*)/)) {
-        const firstAnswerLine = lines[i].match(/^\*\*Answer:\*\*\s*(.*)/)[1];
-        if (firstAnswerLine.trim()) answerLines.push(firstAnswerLine);
-        i++;
-        // collect until next question or heading
-        while (i < lines.length) {
-          if (/^\*\*Q\d+\./.test(lines[i]) || /^## /.test(lines[i]) || /^---/.test(lines[i])) break;
-          answerLines.push(lines[i]);
+      // interviewer note and blank lines
+      while (i < lines.length) {
+        if (lines[i].trim() === '') {
           i++;
+        } else if (lines[i].startsWith('> *What the interviewer')) {
+          note = lines[i].replace(/^> \*/, '').replace(/\*$/, '').trim();
+          i++;
+        } else {
+          break;
         }
+      }
+
+      // collect all answer lines until next question or heading
+      while (i < lines.length) {
+        if (/^\*\*Q\d+/.test(lines[i]) || /^## /.test(lines[i]) || /^---/.test(lines[i])) break;
+        
+        let lineStr = lines[i];
+        // If it's the very first line of the answer, try to strip variations of "**Answer:**"
+        if (answerLines.length === 0) {
+          lineStr = lineStr.replace(/^(\*\*)?Answer:?(\*\*)?\s*/i, '');
+          if (lineStr.trim() !== '') answerLines.push(lineStr);
+        } else {
+          answerLines.push(lineStr);
+        }
+        i++;
       }
 
       // trim trailing empty lines
