@@ -24,13 +24,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Copy scenario files into docs/
+      - name: Prepare site directory
         run: |
+          mkdir -p _site
+          cp -r docs/* _site/
           for domain in kubernetes aws ci-cd docker terraform linux-sre observability networking security general-devops; do
-            mkdir -p docs/$domain
-            cp $domain/scenarios.md docs/$domain/scenarios.md
+            mkdir -p _site/$domain
+            cp $domain/scenarios.md _site/$domain/scenarios.md
           done
-          rm .gitignore
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
@@ -38,7 +39,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: 'docs'
+          path: '_site'
 
       - name: Deploy to GitHub Pages
         id: deployment
