@@ -790,3 +790,612 @@ OUTPUT:
 ```
 
 Runbooks succeed when junior engineers can copy-paste commands and make progress without interpretation.
+
+---
+
+**Q48. [L2] After deploying OpenTelemetry instrumentation, traces appear in staging but not production. The application logs show spans are being created. Where do you look first?**
+
+> *What the interviewer is testing:* OpenTelemetry pipeline debugging, collector/exporter configuration.
+
+**Answer:**
+If spans are created inside the application but do not reach the backend, the problem is usually between the SDK and the telemetry backend.
+I would check:
+1. **Collector endpoint:** Confirm production points to the correct OpenTelemetry Collector address and protocol (`grpc` vs `http/protobuf`).
+2. **Collector pipelines:** Verify the `traces` pipeline has a receiver, required processors, and the correct exporter wired together.
+3. **Exporter errors:** Look at collector logs and metrics such as send failures, queue size, dropped spans, and retry counts.
+4. **Network and auth:** Check NetworkPolicy, security groups, proxy settings, API keys, and TLS certificates.
+5. **Sampling:** Confirm production is not configured with an accidental 0% sampler.
+
+The fastest test is to enable collector debug logging or temporarily export to a local logging exporter. That proves whether spans reached the collector before debugging the vendor/backend side.
+
+---
+
+**Q49. [L3] You need to run an OpenTelemetry Collector for hundreds of services sending metrics, logs, and traces. What production safeguards do you configure so the collector does not become the outage?**
+
+> *What the interviewer is testing:* Collector architecture, backpressure, batching, memory protection.
+
+**Answer:**
+I would treat the collector as production infrastructure, not a side experiment.
+Key safeguards:
+1. **Memory limiter processor:** Drops or refuses data before the collector OOMs.
+2. **Batch processor:** Sends telemetry in efficient batches instead of one event at a time.
+3. **Exporter queues and retries:** Absorb short backend outages without blocking application threads.
+4. **Horizontal scaling:** Run multiple collector replicas behind a load balancer or DaemonSet, depending on whether data is node-local or service-level.
+5. **Separate pipelines:** Keep traces, metrics, and logs in separate pipelines so log floods do not starve critical metrics.
+6. **Self-observability:** Alert on collector dropped spans, exporter failures, queue size, memory usage, and scrape health.
+
+For very high-volume tracing, I would use an agent collector close to workloads and a gateway collector layer for sampling, enrichment, and export.
+
+---
+
+**Q50. [L1] What is the difference between a Prometheus Histogram and a Summary?**
+
+> *What the interviewer is testing:* Metric type fundamentals, percentile calculation tradeoffs.
+
+**Answer:**
+A **Histogram** stores observations in configurable buckets, such as requests under `100ms`, `300ms`, `1s`, and `5s`. Prometheus can aggregate histograms across instances and calculate percentiles later with `histogram_quantile()`.
+
+A **Summary** calculates quantiles inside the client application, such as P95 or P99. It can be accurate for one process, but those quantiles cannot be safely averaged across many replicas.
+
+In production, I usually prefer histograms for request latency because they aggregate well across pods, zones, and services. Summaries are useful when you need client-side quantiles for a single process and do not need fleet-wide aggregation.
+
+---
+
+**Q51. [L2] You need an alert for P95 HTTP latency from Prometheus histogram metrics. What query shape do you use, and what mistake should you avoid?**
+
+> *What the interviewer is testing:* Correct PromQL for histograms and percentile aggregation.
+
+**Answer:**
+For a classic Prometheus histogram, I would calculate P95 from the bucket rate:
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le, service) (
+    rate(http_request_duration_seconds_bucket[5m])
+  )
+) > 0.5
+```
+This says: calculate the 95th percentile latency per service over the last 5 minutes and alert if it is above 500ms.
+
+The major mistake is averaging per-pod P95 values:
+```promql
+avg(http_request_duration_p95)
+```
+That is mathematically wrong because percentiles are not additive. A pod with 10 requests and a pod with 100,000 requests should not have equal weight. Aggregate buckets first, then calculate the percentile.
+
+---
+
+**Q52. [L3] A team wants very accurate latency percentiles but their classic Prometheus histograms create too many bucket time series. What options do you discuss?**
+
+> *What the interviewer is testing:* Histogram bucket design, native histograms, cost vs accuracy.
+
+**Answer:**
+Classic histograms multiply time series by every bucket and every label combination. If a metric has 20 buckets and many labels, cost and memory grow quickly.
+
+I would discuss three options:
+1. **Fix bucket boundaries:** Use fewer buckets that match real SLO boundaries, such as `100ms`, `300ms`, `1s`, and `3s`, instead of many generic buckets.
+2. **Reduce labels:** Remove high-cardinality labels from histogram metrics, especially user IDs, raw paths, tenant IDs, and pod UIDs.
+3. **Evaluate native histograms:** Native histograms can represent distributions more compactly and with dynamic buckets, but the team must verify support across Prometheus, remote storage, Grafana, alert rules, and client libraries.
+
+The decision is a tradeoff: enough precision for SLOs, without turning latency measurement itself into the largest source of telemetry cost.
+
+---
+
+**Q53. [L2] A database outage causes 40 application alerts to page at the same time. How do you reduce the noise without hiding the real incident?**
+
+> *What the interviewer is testing:* Alertmanager grouping, inhibition, dependency-aware alerting.
+
+**Answer:**
+This is a dependency fan-out problem. The database is the likely root cause, while the application alerts are symptoms.
+
+I would use Alertmanager or the equivalent alerting tool to:
+1. **Group alerts** by service, cluster, and incident type so responders receive one grouped notification instead of 40 pages.
+2. **Inhibit downstream alerts** when a higher-level dependency alert is firing. For example, if `DatabaseUnavailable` is active, suppress `CheckoutDatabaseErrors` pages while still showing them in the incident view.
+3. **Keep severity meaningful:** Page for the root cause and major user impact; send dependent symptoms to chat or the incident timeline.
+4. **Add dependency labels:** Include labels such as `dependency="postgres"` so routing and inhibition rules can be precise.
+
+The goal is not to delete signal. It is to present one clear incident with supporting context.
+
+---
+
+**Q54. [L1] What should a production health check endpoint verify, and what should it avoid?**
+
+> *What the interviewer is testing:* Health check design, dependency checks, Kubernetes probes.
+
+**Answer:**
+A health check should be cheap, fast, and designed for the action that will be taken when it fails.
+
+For a **liveness** endpoint, I keep it shallow: can the process respond, is the main event loop alive, and is the app not deadlocked? It should not call every dependency, because a temporary database issue could cause Kubernetes to restart healthy pods unnecessarily.
+
+For a **readiness** endpoint, I check whether the app can safely receive traffic: required config loaded, database connection pool initialized, cache warmed if required, and migrations compatible.
+
+Avoid expensive queries, calls to optional third-party services, or checks that can overload dependencies during an outage. Bad health checks can turn a small dependency issue into a full restart storm.
+
+---
+
+**Q55. [L2] A dashboard turns red every deployment because latency and errors spike briefly during rollout, but users are not affected. How do you make the dashboard more useful?**
+
+> *What the interviewer is testing:* Dashboard design, deploy awareness, separating normal changes from incidents.
+
+**Answer:**
+Dashboards should show deploy context and user impact, not just raw spikes.
+I would add:
+1. **Deployment annotations:** Mark deploy start, version, environment, and rollback events on latency/error graphs.
+2. **Version labels:** Split metrics by `version` or `release` so I can compare old and new pods during rollout.
+3. **User-facing SLIs:** Keep the top row focused on availability, P95/P99 latency, and error rate, not internal restart noise.
+4. **Burn-rate or sustained windows:** Show whether the spike is large enough and long enough to matter.
+5. **Canary panels:** Compare canary vs stable before the release hits 100%.
+
+If the deployment behavior is expected, the dashboard should make that obvious while still exposing abnormal deploy regressions.
+
+---
+
+**Q56. [L3] Distributed traces are broken between two services after one team migrated from B3 headers to W3C Trace Context. What is happening and how do you fix it?**
+
+> *What the interviewer is testing:* Trace propagation standards and cross-team compatibility.
+
+**Answer:**
+The services are using different propagation formats. One service injects trace context using headers such as `traceparent` and `tracestate`, while the other expects B3 headers such as `X-B3-TraceId`. The downstream service starts a new trace because it cannot extract the parent context.
+
+To fix it:
+1. Configure all services to use one standard, preferably W3C Trace Context for new systems.
+2. During migration, enable multi-propagator support so services can extract both B3 and W3C while injecting the chosen standard.
+3. Verify API gateways, service meshes, and async message producers preserve trace headers.
+4. Add a test that sends a request through both services and asserts one shared trace ID.
+
+Trace propagation is a contract. It must be standardized the same way API auth headers are standardized.
+
+---
+
+**Q57. [L2] Your logs accidentally contain passwords, access tokens, and customer PII. What controls do you put in place?**
+
+> *What the interviewer is testing:* Secure logging, redaction, data governance.
+
+**Answer:**
+I would fix this at multiple layers because relying on one filter is risky.
+1. **Application allowlisting:** Log known-safe fields instead of dumping full request bodies or objects.
+2. **Redaction middleware:** Mask fields such as `password`, `authorization`, `cookie`, `token`, `ssn`, and `credit_card`.
+3. **Collector-side filtering:** Add Fluent Bit, Logstash, or OpenTelemetry Collector processors to redact known patterns before export.
+4. **Access control:** Restrict who can query sensitive logs and audit log searches.
+5. **Retention policy:** Shorten retention for sensitive sources and route regulated data to compliant storage only when required.
+6. **Tests:** Add unit or integration tests that fail if known secret field names are emitted.
+
+The best answer is prevention in application logging, with pipeline redaction as a backup.
+
+---
+
+**Q58. [L1] What is structured logging, and why is it better than plain text logs for production troubleshooting?**
+
+> *What the interviewer is testing:* Log format basics and queryability.
+
+**Answer:**
+Structured logging writes logs as key-value data, usually JSON:
+```json
+{"level":"error","service":"checkout","order_id":"123","trace_id":"abc","message":"payment failed"}
+```
+Plain text logs are easy for humans to read but hard for machines to search reliably.
+
+Structured logs let you filter and aggregate by fields:
+1. Find all errors for `service=checkout`.
+2. Search a specific `trace_id` or `order_id`.
+3. Count failures by `payment_provider`.
+4. Build alerts from fields without fragile regex parsing.
+
+In production, structured logs reduce guesswork because every important piece of context has a consistent field name.
+
+---
+
+**Q59. [L2] A Prometheus graph shows gaps for a service after pods restart. Does a missing line mean the service was healthy with zero traffic? How do you alert on missing data correctly?**
+
+> *What the interviewer is testing:* Prometheus staleness, absent metrics, scrape health.
+
+**Answer:**
+Missing data does not mean zero. It usually means Prometheus did not scrape the target, the metric disappeared, or the pod restarted and the series went stale.
+
+I would separate two cases:
+1. **Zero value:** The service exported the metric with value `0`.
+2. **No series:** Prometheus has no current sample for that label set.
+
+For scrape health, alert on:
+```promql
+up{job="checkout"} == 0
+```
+For a metric that must always exist, use:
+```promql
+absent(rate(http_requests_total{service="checkout"}[5m]))
+```
+or alert when expected targets disappear from service discovery.
+
+This prevents treating missing telemetry as healthy behavior.
+
+---
+
+**Q60. [L3] Your SLO alert pages too late during fast outages and too often during tiny blips. How do multi-window burn-rate alerts help?**
+
+> *What the interviewer is testing:* Practical SLO alerting and paging signal quality.
+
+**Answer:**
+Multi-window burn-rate alerts combine a short window and a long window.
+
+A fast outage should page quickly, so the short window detects rapid error budget consumption. But short windows are noisy, so the long window confirms the issue is sustained enough to matter.
+
+Example approach:
+1. **Page:** High burn rate over both `5m` and `1h`. This catches severe active incidents.
+2. **Ticket or chat:** Lower burn rate over `30m` and `6h`. This catches slow reliability degradation.
+
+This design avoids two bad outcomes:
+- Waiting hours to page during a complete outage.
+- Paging for a harmless one-minute spike.
+
+It aligns alerts with user impact and error budget consumption instead of static error counts.
+
+---
+
+**Q61. [L2] A canary deployment serves only 5% of traffic. Overall error rate looks normal, but canary users are failing. How do you catch this?**
+
+> *What the interviewer is testing:* Canary observability, label-based comparisons, aggregation pitfalls.
+
+**Answer:**
+Aggregate dashboards hide small-scope failures. If the canary has a 20% error rate but receives only 5% of traffic, the global error rate may barely move.
+
+I would:
+1. Add a `version`, `release`, or `deployment_track` label to request metrics, logs, and traces.
+2. Compare canary vs stable for request rate, error rate, latency, and saturation.
+3. Use automated promotion gates that fail the rollout if canary error rate or latency is worse than stable by a defined threshold.
+4. Ensure logs and traces include the same version label for root cause analysis.
+
+Canary monitoring must compare cohorts. Overall averages are not enough.
+
+---
+
+**Q62. [L1] What is the difference between monitoring and observability?**
+
+> *What the interviewer is testing:* Conceptual clarity beyond tools.
+
+**Answer:**
+**Monitoring** tells you whether known failure modes are happening. Example: CPU is high, disk is full, or the service is returning 500 errors.
+
+**Observability** helps you understand unknown failure modes by exposing enough telemetry to ask new questions without shipping new code. Example: "Only users in one region using one payment method are slow after version 2.4.1."
+
+Monitoring is usually dashboard and alert focused. Observability includes metrics, logs, traces, events, profiling, and good metadata so engineers can investigate systems they do not fully predict in advance.
+
+You need both: monitoring for fast detection, observability for fast explanation.
+
+---
+
+**Q63. [L2] Users in Europe report checkout failures, but US synthetic checks are green. What is wrong with the monitoring strategy?**
+
+> *What the interviewer is testing:* Synthetic coverage, regional dependency failures, user-path monitoring.
+
+**Answer:**
+The synthetic checks do not match the user population or the failing path. A single US probe cannot prove global availability.
+
+I would improve coverage by:
+1. Running synthetic checks from multiple regions where customers actually live.
+2. Testing the full checkout workflow, not just the homepage or `/health`.
+3. Separating DNS, CDN, TLS, frontend, API, and payment-provider timing in the synthetic result.
+4. Alerting on regional failure patterns, such as Europe failing while US remains green.
+5. Comparing synthetic checks with RUM data from real browsers.
+
+Monitoring must test from the user's point of view. Otherwise, it only proves the service works from the monitoring vendor's nearest region.
+
+---
+
+**Q64. [L3] After enabling service mesh telemetry, Prometheus cardinality explodes because metrics include source pod, destination pod, path, method, response code, and workload labels. How do you control it?**
+
+> *What the interviewer is testing:* Service mesh metrics, label control, aggregation strategy.
+
+**Answer:**
+Service mesh telemetry is powerful but can create a series for every source-destination-path combination.
+
+I would control it by:
+1. Dropping pod-level labels from high-volume metrics and keeping workload, namespace, and service labels.
+2. Normalizing paths, such as `/orders/{id}` instead of `/orders/12345`.
+3. Keeping method and response-code class, but avoiding unnecessary headers or user-level labels.
+4. Creating recording rules for common service-to-service RED metrics.
+5. Applying metric relabeling at scrape time to remove labels that are not used in alerts or dashboards.
+6. Setting cardinality budgets per team and reviewing top series regularly.
+
+The goal is service-level observability, not a unique time series for every request shape.
+
+---
+
+**Q65. [L2] A pod crashes before the log shipper sends its final error lines. How do you avoid losing the most important logs?**
+
+> *What the interviewer is testing:* Container logging, buffering, termination behavior.
+
+**Answer:**
+I would design logging so logs leave the process quickly and survive container restarts.
+1. Write logs to stdout/stderr in structured format so the container runtime captures them.
+2. Run a node-level log agent, such as Fluent Bit or the OpenTelemetry Collector, that tails container log files outside the pod lifecycle.
+3. Tune buffering so the agent can survive short backend outages without dropping error logs.
+4. Set graceful termination periods so the application flushes logs before exit.
+5. For critical failures, emit a metric or event in addition to logs because logs alone can be delayed or dropped.
+
+I would also check previous container logs with `kubectl logs --previous` during investigation.
+
+---
+
+**Q66. [L2] Prometheus graphs have regular gaps every 15 minutes for many targets. What do you investigate?**
+
+> *What the interviewer is testing:* Scrape reliability, timeouts, sample limits, target health.
+
+**Answer:**
+Regular gaps point to scrape or ingestion problems, not random application behavior.
+
+I would check:
+1. `up` for affected targets during the gaps.
+2. `scrape_duration_seconds` to see whether scrapes are timing out.
+3. `scrape_samples_scraped` and sample-limit errors if exporters produce too many metrics.
+4. Prometheus CPU, memory, WAL, and disk I/O during the gap.
+5. Network, DNS, service discovery, or load balancer behavior on a 15-minute schedule.
+6. Exporter logs for slow collection, especially exporters that call cloud APIs or databases.
+
+The fix depends on the cause: increase scrape timeout carefully, reduce exporter work, shard Prometheus, or remove expensive metrics.
+
+---
+
+**Q67. [L3] You must trace all failed checkout requests for debugging, but privacy rules forbid exporting raw customer identifiers. How do you design trace sampling and attributes?**
+
+> *What the interviewer is testing:* Tail sampling, privacy-aware telemetry, attribute hygiene.
+
+**Answer:**
+I would combine tail-based sampling with strict attribute controls.
+
+For sampling:
+1. Keep 100% of failed checkout traces.
+2. Keep 100% of very slow checkout traces.
+3. Keep a small random sample of successful checkout traces for baseline behavior.
+
+For privacy:
+1. Do not attach raw email, name, phone, address, card, or token values to spans.
+2. Use safe identifiers such as hashed customer ID only if policy allows it.
+3. Keep coarse business attributes, such as `payment_method_type`, `country`, `app_version`, and `checkout_step`.
+4. Redact at the SDK and collector layer before export.
+
+This preserves the debugging value of traces without turning the tracing backend into a sensitive data store.
+
+---
+
+**Q68. [L1] What are MTTD and MTTR, and how does observability improve them?**
+
+> *What the interviewer is testing:* Incident metrics and operational outcomes.
+
+**Answer:**
+**MTTD** means Mean Time To Detect: how long it takes to notice a problem after it starts.
+
+**MTTR** means Mean Time To Restore or Recover: how long it takes to bring the service back to an acceptable state.
+
+Observability improves MTTD with good alerts, synthetic checks, SLO burn-rate alerts, and clear user-impact dashboards.
+
+It improves MTTR with useful logs, traces, metrics, deployment markers, runbooks, and correlation IDs that help engineers find the failing dependency quickly.
+
+The goal is not just more telemetry. The goal is shorter time from user impact to confident mitigation.
+
+---
+
+**Q69. [L2] Every alert in your system has severity `critical`, so on-call gets paged for low-risk issues. How do you design alert severity levels?**
+
+> *What the interviewer is testing:* Alert prioritization, paging discipline, incident response.
+
+**Answer:**
+Severity should map to required human action.
+
+I would define levels like:
+1. **Page immediately:** User-facing outage, fast error budget burn, data loss risk, security-impacting production issue.
+2. **Urgent ticket or chat:** Degradation that needs same-day action but is not actively hurting users.
+3. **Backlog ticket:** Capacity trend, cleanup task, non-production issue, or informational warning.
+
+Each alert should include owner, service, impact, runbook, dashboard link, and escalation path. If no one needs to wake up and act immediately, it should not be a paging alert.
+
+This reduces alert fatigue and makes critical pages meaningful again.
+
+---
+
+**Q70. [L3] How do you design observability for serverless functions such as AWS Lambda where instances are short-lived and you cannot scrape them like normal servers?**
+
+> *What the interviewer is testing:* Serverless telemetry patterns, cold starts, async failures.
+
+**Answer:**
+Serverless observability must use the platform telemetry path because functions may start and disappear before a pull-based scraper can reach them.
+
+I would capture:
+1. **Logs:** Structured logs to CloudWatch Logs or a collector subscription.
+2. **Metrics:** Invocation count, errors, duration, throttles, concurrency, iterator age for streams, and DLQ depth for async failures.
+3. **Custom metrics:** Business outcomes such as orders processed or payment failures.
+4. **Traces:** Enable distributed tracing and propagate trace context through API Gateway, queues, and downstream calls.
+5. **Cold starts:** Track initialization time separately from handler duration.
+6. **Timeouts and retries:** Alert on retry storms, partial batch failures, and poison messages.
+
+For serverless, absence of hosts does not mean absence of operations. You move observability to invocations, events, and managed-service metrics.
+
+---
+
+**Q71. [L2] CPU and memory look normal, but requests are timing out. What internal saturation metrics should you check?**
+
+> *What the interviewer is testing:* Saturation beyond host resources.
+
+**Answer:**
+Host CPU and memory are not the only bottlenecks. I would check saturation inside the application and dependencies:
+1. Thread pool active count and queue length.
+2. Database connection pool usage and wait time.
+3. HTTP client connection pool usage.
+4. Garbage collection pause time.
+5. Worker queue depth and age of oldest item.
+6. File descriptors and socket counts.
+7. Rate limiter rejections or circuit breaker state.
+
+A service can be idle from a CPU perspective but completely blocked waiting for database connections or outbound sockets. Good observability exposes these internal queues and pools.
+
+---
+
+**Q72. [L1] What is an absence alert, and when would you use one?**
+
+> *What the interviewer is testing:* Missing signal detection.
+
+**Answer:**
+An absence alert fires when expected telemetry stops arriving.
+
+Examples:
+1. A cron job should publish `backup_success_total` every night, but no sample appears.
+2. A payment service should always have some traffic during business hours, but request metrics disappear.
+3. A log shipper stops sending heartbeat logs.
+
+This is different from alerting on a metric value. You are alerting that the signal itself is missing.
+
+Absence alerts are useful for batch jobs, telemetry pipelines, and critical services where "no data" might mean monitoring is broken or the job never ran.
+
+---
+
+**Q73. [L2] After a frontend deployment, the API returns 200 OK but users see a blank page. Backend APM is green. What telemetry would catch this?**
+
+> *What the interviewer is testing:* Frontend observability, browser errors, user experience monitoring.
+
+**Answer:**
+Backend APM cannot see browser rendering failures.
+
+I would use:
+1. **Real User Monitoring:** Capture JavaScript errors, route changes, page load timings, and Core Web Vitals from real browsers.
+2. **Synthetic browser checks:** Load the page, execute JavaScript, and assert that key UI elements render.
+3. **Frontend release tags:** Attach build version, route, browser, and device metadata to errors.
+4. **CDN/static asset metrics:** Check 404s, cache behavior, and asset download latency.
+5. **Source maps:** Upload source maps securely so minified JavaScript stack traces are readable.
+
+The alert should be based on user-visible failure, such as a spike in JavaScript errors or failed synthetic checkout, not only backend status codes.
+
+---
+
+**Q74. [L3] During an incident, dashboards show "no data" for several critical services. How do you distinguish a telemetry outage from an application outage?**
+
+> *What the interviewer is testing:* Meta-monitoring and observability reliability.
+
+**Answer:**
+Observability systems need their own monitoring.
+
+I would check:
+1. Collector and log shipper health: dropped data, queue size, exporter failures, restarts.
+2. Prometheus scrape health and target discovery.
+3. Remote-write or vendor ingestion status.
+4. Independent blackbox checks against the application.
+5. Cloud/load balancer metrics that do not depend on the same telemetry pipeline.
+6. Recent deploys or config changes to collectors and agents.
+
+If blackbox checks and platform metrics are healthy but telemetry pipelines are failing, it is a monitoring incident. If both user-facing probes and telemetry are bad, it is likely an application or infrastructure incident.
+
+I would also alert separately on telemetry pipeline failure, because "no data" during an outage is itself a severe operational risk.
+
+---
+
+**Q75. [L2] Logs and traces from different services appear out of order by several minutes. What causes this and how do you fix it?**
+
+> *What the interviewer is testing:* Time synchronization, event timestamps, distributed debugging.
+
+**Answer:**
+The most common cause is clock skew between hosts, containers, or regions. Distributed systems rely on timestamps for log ordering, trace timelines, and incident reconstruction.
+
+I would check:
+1. NTP or chrony status on nodes and base images.
+2. Whether logs use event time from the application or ingestion time from the collector.
+3. Timezone formatting and timestamp parsing in the log pipeline.
+4. Collector buffering delays that make ingestion time misleading.
+
+The fix is to enforce time synchronization on all nodes, emit timestamps in UTC with a standard format, and preserve both event timestamp and ingestion timestamp when possible.
+
+Trace tools can tolerate small clock skew, but minutes of skew makes root cause analysis unreliable.
+
+---
+
+**Q76. [L1] Why should every log, metric, and trace include service name, environment, and version metadata?**
+
+> *What the interviewer is testing:* Telemetry correlation and release debugging.
+
+**Answer:**
+Without consistent metadata, telemetry is hard to search and easy to misread.
+
+Key fields:
+1. `service.name`: Which service emitted the data.
+2. `deployment.environment`: Production, staging, development, or another environment.
+3. `service.version`: Which build or release is running.
+4. Region, cluster, namespace, and team owner when relevant.
+
+This metadata lets engineers answer practical questions:
+- Did errors start after version `2.8.0`?
+- Is only production affected?
+- Is one region bad?
+- Which team owns the service?
+
+Good metadata turns separate metrics, logs, and traces into correlated evidence.
+
+---
+
+**Q77. [L2] After a Kubernetes upgrade, Prometheus shows `up == 0` for many pod scrape targets. What do you check?**
+
+> *What the interviewer is testing:* Kubernetes service discovery, scraping, network and auth issues.
+
+**Answer:**
+I would troubleshoot the scrape path from Prometheus to the pods.
+1. **Service discovery:** Are the pods still discovered with the expected labels and annotations?
+2. **Endpoint changes:** Did ServiceMonitor, PodMonitor, or scrape configs stop matching after label changes?
+3. **NetworkPolicy:** Can Prometheus still reach pod IPs and metrics ports?
+4. **TLS/auth:** Did certificates, service account tokens, or mTLS settings change?
+5. **Metrics endpoint:** Does `/metrics` still respond from inside the cluster?
+6. **Prometheus logs:** Look for scrape errors such as timeout, connection refused, 401, 403, or x509 failures.
+
+`up == 0` is a scrape failure. The application may be healthy, but Prometheus cannot collect its metrics.
+
+---
+
+**Q78. [L3] Your metrics vendor has an outage. Prometheus remote write queues grow, local disk fills, and the monitoring stack becomes unstable. How do you design for this failure mode?**
+
+> *What the interviewer is testing:* Remote write backpressure, queue tuning, failure isolation.
+
+**Answer:**
+Remote storage must be treated as a dependency that can fail.
+
+I would:
+1. Tune remote write queue capacity, shard count, retry backoff, and sample age limits.
+2. Keep local retention sufficient for short vendor outages, but not so large that disks fill silently.
+3. Alert on remote write failed samples, retried samples, queue length, and WAL disk usage.
+4. Drop or downsample non-critical metrics during prolonged backend outages.
+5. Run HA Prometheus pairs carefully so both instances do not overload the vendor with duplicate retries.
+6. Maintain local dashboards for active incidents even if the vendor UI is unavailable.
+
+The goal is graceful degradation: keep critical local alerting alive even when long-term storage is down.
+
+---
+
+**Q79. [L2] A tracing backend becomes expensive and slow because span names include full URLs like `/users/123/orders/987`. What is the problem and how do you fix it?**
+
+> *What the interviewer is testing:* Span naming, high-cardinality trace attributes.
+
+**Answer:**
+The span name contains unbounded identifiers. Every user ID and order ID creates a different operation name, making search, aggregation, and storage expensive.
+
+I would normalize span names:
+```text
+Bad:  GET /users/123/orders/987
+Good: GET /users/{user_id}/orders/{order_id}
+```
+Then I would store IDs only as attributes if they are safe and necessary, and avoid indexing high-cardinality attributes by default.
+
+Good span names represent the operation shape, not one specific request. This lets the tracing backend group latency, errors, and throughput by endpoint correctly.
+
+---
+
+**Q80. [L3] The business asks for an executive dashboard showing whether checkout is healthy. Infrastructure dashboards are too technical. What do you include?**
+
+> *What the interviewer is testing:* Business-aligned observability and executive-level SLIs.
+
+**Answer:**
+I would build the dashboard around the customer journey, not servers.
+
+Top-level signals:
+1. Checkout availability: successful checkout attempts divided by total attempts.
+2. Checkout latency: P95 or P99 time from cart submit to order confirmation.
+3. Payment success rate and provider error rate.
+4. Order creation rate compared with normal baseline.
+5. Revenue-impacting failure count.
+6. Current SLO status and error budget remaining.
+7. Active incidents, recent deploys, and rollback status.
+
+Technical panels can exist below the fold, but the first view should answer: "Can customers buy right now, how many are failing, and is this within our reliability target?"

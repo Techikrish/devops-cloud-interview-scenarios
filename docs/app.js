@@ -59,7 +59,7 @@ const DOMAINS = [
     emoji: '📊',
     title: 'Observability',
     desc: 'Monitoring, logging, metrics, tracing, alerting',
-    count: 47,
+    count: 80,
     color: '#f5a623',
     file: 'observability/scenarios.md'
   },
