@@ -390,8 +390,7 @@ These command-line tweaks take effect immediately without a reboot, mitigating t
 
 ---
 
-**Q30. [L1] A log file consists of rows like: `ERROR 2023-10-01 User bob failed login`.
-Using basic Linux text processing, how would you print only the names (like 'bob') of the users who failed?**
+**Q30. [L1] A log file consists of rows like: `ERROR 2023-10-01 User bob failed login`. Using basic Linux text processing, how would you print only the names (like 'bob') of the users who failed?**
 
 > *What the interviewer is testing:* `awk` usage, stream manipulation.
 
@@ -1649,3 +1648,460 @@ Best practices:
    - Hold weekly on-call handoff meetings: outgoing on-call briefs incoming on-call
    - Review every page: Was it actionable? Was the runbook sufficient? What can be automated?
    - Track metrics: pages per shift, time-to-acknowledge, time-to-resolve
+
+---
+
+**Q81. [L2] After adding a new data disk to `/etc/fstab` and rebooting, a production server boots into emergency mode. You have console access. How do you diagnose and recover it safely?**
+
+> *What the interviewer is testing:* Boot recovery, fstab correctness, UUID usage, and safe change validation.
+
+**Answer:**
+Emergency mode means systemd could not complete the local filesystem mounts required by `/etc/fstab`, so it dropped to a minimal root shell instead of continuing to multi-user mode. The most common causes are a wrong UUID, a typo in the mount options, a filesystem that needs repair, or a network mount that is unreachable during boot.
+
+I would log in on the console and first make the root filesystem writable if it is mounted read-only:
+
+```bash
+mount -o remount,rw /
+journalctl -xb | grep -iE 'mount|fstab|failed|emergency'
+systemctl --failed
+mount -a
+```
+
+`mount -a` is the fastest way to reproduce the exact failure. I would then compare the failing entry with `blkid` output, correct the UUID or device path, and fix options such as `nofail`, `x-systemd.device-timeout=`, or `_netdev`. If the entry is not required for boot, I would comment it out, run `systemctl daemon-reload`, and reboot. If the filesystem itself is damaged, I would run `fsck` only while it is unmounted.
+
+To prevent a repeat, I would use UUIDs rather than device names, mark non-critical and network mounts with `nofail`, test with `findmnt --verify --verbose` and `mount -a` before rebooting, and keep console or out-of-band access available. A configuration change to `/etc/fstab` should be treated like any other production change: reviewed, tested on a non-production host, and covered by a snapshot or rollback plan.
+
+---
+
+**Q82. [L2] An application suddenly starts logging "Read-only file system" errors. `mount` shows the root filesystem mounted as `ro`, and `dmesg` contains I/O errors. What happened, and how do you recover without making the damage worse?**
+
+> *What the interviewer is testing:* Filesystem error handling, storage failure diagnosis, and safe recovery.
+
+**Answer:**
+This is usually the kernel protecting the filesystem. Filesystems such as ext4 can be configured with `errors=remount-ro`, so after a write error, metadata inconsistency, or failing block device, the kernel remounts the filesystem read-only rather than continuing to write and risk corruption. The application is seeing the symptom; the storage layer is the actual problem.
+
+I would stop application writers, preserve the evidence, and check:
+
+```bash
+dmesg -T | grep -iE 'I/O error|EXT4-fs|XFS|remount|medium error'
+journalctl -k --since '30 minutes ago'
+mount | grep ' / '
+df -h /
+smartctl -a /dev/nvme0n1
+```
+
+If the error was transient and the device is healthy, I would remount read-write with `mount -o remount,rw /` and monitor. If the disk is failing, I would not keep forcing writes. On a cloud instance, I would snapshot the volume, replace the instance or volume, and restore from a known-good backup. If a filesystem check is needed, it must be done offline or from a rescue environment, never on a mounted read-write production filesystem.
+
+The long-term fix is redundancy plus detection: RAID or replicated storage, SMART and cloud volume-health monitoring, alerts on kernel I/O errors, tested backups, and a documented recovery runbook. The read-only remount is a safety mechanism, so the goal is to fix the underlying storage fault rather than simply remounting and hoping it stays healthy.
+
+---
+
+**Q83. [L2] `smartctl -a` shows an increasing `Reallocated_Sector_Ct` and two pending sectors on a production disk, but the application is still running. What do you do?**
+
+> *What the interviewer is testing:* Predictive disk failure, SMART attributes, and planned replacement without downtime.
+
+**Answer:**
+Pending sectors are sectors the drive could not read and is waiting to remap. Reallocated sectors mean the drive has already replaced bad sectors from its spare pool. A couple of pending sectors is not an immediate outage, but an increasing count is a strong predictive-failure signal and should be treated as a maintenance event, not ignored until the disk dies.
+
+I would first establish redundancy and impact:
+
+```bash
+smartctl -a /dev/sda
+smartctl -x /dev/sda
+smartctl -t long /dev/sda
+cat /proc/mdstat
+```
+
+I would check whether the disk is part of a healthy RAID set, whether a hot spare exists, and whether backups are current. Then I would schedule a replacement during a maintenance window, add the new disk, let the array rebuild, and verify the rebuild completed without errors. If there is no redundancy, I would copy data to a new volume first and only then remove the failing disk. On cloud instances I would check EBS or local NVMe health and replace the volume or instance according to the provider's process.
+
+I would also configure `smartd` or the cloud equivalent to alert on reallocated, pending, and uncorrectable sectors, and track the trend rather than a single threshold. The key interview point is that SMART gives you time to act; the mistake is waiting for the disk to fail completely and turning a planned replacement into an outage.
+
+---
+
+**Q84. [L2] Log rotation is failing for `/var/log/app/audit.log`. Even `rm` as root returns "Operation not permitted", and `lsattr` shows the immutable flag. How do you fix it and prevent this from recurring?**
+
+> *What the interviewer is testing:* Extended filesystem attributes, root limitations, and audit/compliance awareness.
+
+**Answer:**
+The immutable attribute (`i`) prevents files from being modified, renamed, or deleted, even by root. This is commonly set by a security baseline, a compliance tool, or an attacker trying to preserve evidence or prevent cleanup. `lsattr /var/log/app/audit.log` confirms the flag; `chattr -i` removes it.
+
+I would first confirm the file is not on a read-only mount and that the issue is not SELinux or an ACL:
+
+```bash
+lsattr /var/log/app/audit.log
+mount | grep ' /var '
+getfacl /var/log/app/audit.log
+```
+
+Then, after confirming the business or compliance reason for the attribute, I would remove it, rotate the log, and decide whether to restore it:
+
+```bash
+chattr -i /var/log/app/audit.log
+logrotate -f /etc/logrotate.d/myapp
+chattr +i /var/log/app/audit.log
+```
+
+For an audit log that must be append-only, the `a` attribute may be more appropriate than `i`; it permits appends but blocks deletion and modification. I would document the exception, check configuration management so it does not silently reapply the wrong attribute, and use `auditd` to record who changed the attribute. If the flag appeared unexpectedly, I would treat it as a possible security incident and preserve the surrounding logs before changing anything.
+
+---
+
+**Q85. [L2] You edited `/etc/systemd/system/myapp.service` and ran `systemctl restart myapp`, but the service is still using the old `ExecStart` command. Why, and how do you apply the change safely?**
+
+> *What the interviewer is testing:* systemd unit loading, drop-in precedence, and safe service changes.
+
+**Answer:**
+`systemctl restart` asks systemd to restart the service using the unit definition it already has in memory. It does not reread unit files from disk. After editing a unit, you must run `systemctl daemon-reload` so the manager reloads the unit definitions, then restart the service.
+
+I would verify what systemd actually sees before changing anything:
+
+```bash
+systemctl cat myapp.service
+systemctl show myapp.service -p FragmentPath -p DropInPaths -p ExecStart
+systemctl status myapp.service
+```
+
+`systemctl cat` shows the main unit plus any drop-ins, which is important because a file in `/etc/systemd/system/myapp.service.d/` can override the base unit. I would make the intended change in a drop-in using `systemctl edit myapp.service`, validate it with `systemd-analyze verify myapp.service`, run `systemctl daemon-reload`, and then restart. For a socket-activated or timer-activated service, I would also restart the associated socket or timer.
+
+In production I would avoid editing units by hand on individual hosts. I would ship the unit and drop-ins through configuration management, roll out to a canary first, and verify the effective `ExecStart`, environment, and limits with `systemctl show`. `daemon-reload` changes the manager's configuration; it does not restart running processes, so both steps are required.
+
+---
+
+**Q86. [L3] An application is crash-looping. After you fix the underlying bug, systemd still refuses to start it and reports "start request repeated too quickly." What is happening, and how do you recover correctly?**
+
+> *What the interviewer is testing:* systemd restart rate limiting, crash-loop diagnosis, and safe recovery.
+
+**Answer:**
+Systemd applies a start rate limit to prevent a failing service from restarting forever and consuming resources. The defaults are typically five starts within ten seconds. Once the limit is exceeded, the unit enters a failed state and further start requests are refused even if the application has been fixed.
+
+I would inspect the unit and its restart policy:
+
+```bash
+systemctl status myapp.service
+journalctl -u myapp.service --since '15 minutes ago'
+systemctl show myapp.service -p Restart -p RestartSec -p StartLimitIntervalSec -p StartLimitBurst
+```
+
+After correcting the root cause, I would clear the failed start counter and start the service:
+
+```bash
+systemctl reset-failed myapp.service
+systemctl start myapp.service
+```
+
+I would then tune the policy rather than disabling the protection blindly. `RestartSec=` provides backoff, `StartLimitIntervalSec=` and `StartLimitBurst=` define the window, and `RestartPreventExitStatus=` can prevent restarting on configuration errors that will never succeed. For a service that depends on a database, I would add a proper readiness check or `ExecStartPre` validation instead of an aggressive restart loop.
+
+The important distinction is that rate limiting is a safety feature, not the root cause. Clearing the counter without fixing the application only restarts the crash loop.
+
+---
+
+**Q87. [L2] A junior administrator edited `/etc/sudoers` directly and introduced a syntax error. Now every `sudo` command fails, and no one can get root. How do you recover, and how do you prevent it?**
+
+> *What the interviewer is testing:* Sudoers syntax, break-glass access, and safe privilege management.
+
+**Answer:**
+Sudo refuses to operate when `/etc/sudoers` or an included file has invalid syntax, because running with a partially parsed policy could grant unintended privileges. If no root shell is open, recovery requires out-of-band access: a root password on the console, a cloud serial console, SSM Session Manager, or booting into rescue or single-user mode.
+
+Once I have root, I would validate and repair the file:
+
+```bash
+visudo -c -f /etc/sudoers
+visudo -c
+```
+
+`visudo` locks the file, checks syntax before saving, and prevents this exact problem. If the bad line is obvious, I would remove it; if not, I would restore the last known-good backup or the package default, then re-add the intended rule. I would also check `/etc/sudoers.d/` because a syntax error in an included drop-in produces the same failure.
+
+Prevention matters more than recovery. Always edit with `visudo`, put team-specific rules in small files under `/etc/sudoers.d/`, validate with `visudo -cf`, test in staging, and manage the files through configuration management. Keep a documented break-glass path that does not depend on sudo, such as a console password or a controlled root account, and test it regularly.
+
+---
+
+**Q88. [L3] A runaway process is spawning children exponentially, the load average is climbing, and new SSH sessions are failing. How do you contain the fork bomb and prevent it from taking down the host again?**
+
+> *What the interviewer is testing:* Process control, cgroups, resource limits, and emergency response.
+
+**Answer:**
+A fork bomb consumes the process table and scheduler slots faster than an administrator can kill individual PIDs. The priority is to stop new forks and isolate the blast radius, not to chase processes one by one.
+
+I would use an existing root or console session and, if possible, freeze the service's cgroup before killing it:
+
+```bash
+systemctl status myapp.service
+systemctl freeze myapp.service
+systemctl stop myapp.service
+```
+
+If the processes are not managed by systemd, I would identify the owning user or session, send `SIGSTOP` to that user's processes, and then kill the process group or session. On a cgroup v2 host I can write `1` to `cgroup.freeze` for the affected cgroup. A reboot is the last resort when the host is already unusable, but I would preserve logs first if possible.
+
+Prevention should be layered: run untrusted workloads under a dedicated user, set `LimitNPROC` in `/etc/security/limits.conf` or a systemd `TasksMax=`, enforce a cgroup `pids.max`, reserve capacity for administrative SSH, and alert on process-count growth. On Kubernetes, use pod-level PID limits and resource quotas. The key point is that `kernel.pid_max` only raises the ceiling; it does not contain a fork bomb.
+
+---
+
+**Q89. [L2] After a VM migration, an application starts rejecting JWTs as "not yet valid," TLS errors mention certificate validity, and logs from several hosts are out of order. `date` differs from a known-good server by seven minutes. What do you check and fix?**
+
+> *What the interviewer is testing:* Time synchronization, NTP/chrony, and the operational impact of clock skew.
+
+**Answer:**
+Clock skew breaks far more than log timestamps. TLS certificate validation, JWT `iat`/`exp` checks, Kerberos, distributed tracing, database replication, and audit trails all assume reasonably synchronized clocks. A seven-minute drift is enough to cause authentication failures and confusing incident timelines.
+
+I would inspect the time sources and synchronization state:
+
+```bash
+timedatectl
+chronyc tracking
+chronyc sources -v
+```
+
+On a system using `ntpd`, the equivalent is `ntpq -p`; on `systemd-timesyncd`, use `timedatectl timesync-status`. I would verify that UDP 123 is allowed to the internal NTP servers, that the VM host is not drifting, and that the service is enabled at boot. If the offset is large, I would correct it deliberately with `chronyc makestep` or a controlled step, then confirm the offset settles near zero.
+
+For production, I would point hosts at redundant internal NTP sources, monitor offset and stratum, and avoid relying on a one-off `date -s` correction that disappears after a reboot. Containers inherit the host clock, so fixing the node is usually the right layer. The interviewer is looking for the connection between a boring time service and a very visible authentication outage.
+
+---
+
+**Q90. [L2] Redis background saves fail with `fork: Cannot allocate memory` even though `free -h` shows plenty of free RAM. What is causing this, and how do you fix it safely?**
+
+> *What the interviewer is testing:* Linux memory overcommit, fork semantics, copy-on-write, and Redis operations.
+
+**Answer:**
+`fork()` does not immediately copy all of the parent's memory. It creates a new process with copy-on-write pages, but the kernel still has to account for the virtual memory commitment. With strict overcommit (`vm.overcommit_memory=2`), the kernel can refuse that allocation even when `free` shows available physical RAM, because the commit limit has been reached. Redis then logs the `fork` failure and background saves stop.
+
+I would confirm the policy and the accounting:
+
+```bash
+cat /proc/sys/vm/overcommit_memory
+grep -E 'CommitLimit|Committed_AS|MemAvailable' /proc/meminfo
+redis-cli info persistence
+dmesg | tail -50
+```
+
+A common Redis recommendation is `vm.overcommit_memory=1`, which allows the kernel to overcommit and lets the fork succeed, but that is a host-wide decision and can increase OOM risk. A safer capacity approach is to keep headroom for the fork, set `maxmemory` and an appropriate eviction policy, avoid swapping, and monitor `used_memory`, `rdb_last_bgsave_status`, and commit usage.
+
+I would persist the chosen sysctl in `/etc/sysctl.d/`, test a forced background save, and document the tradeoff. The answer should not be just "echo 1 into sysctl"; the interviewer wants to hear why a process with free RAM can still fail to fork.
+
+---
+
+**Q91. [L2] An incident happened at 2 AM, but the next morning `sar` has no historical data for that period, so the team cannot reconstruct CPU, memory, or disk behavior. How do you enable reliable historical performance collection and use it for RCA?**
+
+> *What the interviewer is testing:* sysstat collection, retention, and evidence-driven incident review.
+
+**Answer:**
+`sar` is only useful if the `sysstat` collector has been running and retaining data. On many distributions the package is installed but collection is disabled by default; on others the service is enabled but retention is too short. I would first check whether data exists and whether the collector is active:
+
+```bash
+systemctl status sysstat
+ls -l /var/log/sa/
+sar -u -f /var/log/sa/sa$(date +%d)
+```
+
+I would enable and start the appropriate service or timer, confirm `/etc/default/sysstat` has `ENABLED="true"` on Debian/Ubuntu or the equivalent setting on RHEL, and review the retention setting (`HISTORY=`). Then I would verify that a new `sa` file is written and that `sar`, `iostat`, and `pidstat` can read it.
+
+Historical data should cover at least the incident window plus enough baseline to distinguish normal from abnormal. I would also centralize node metrics in Prometheus, CloudWatch, or another long-term store, because local `sar` files disappear when an instance is replaced. The postmortem can then correlate local process-level detail with centralized metrics and logs.
+
+The key operational lesson is to test monitoring and historical collection before an incident, not during one. A dashboard with a 15-minute retention window is not an RCA tool.
+
+---
+
+**Q92. [L3] The security team asks you to harden a production systemd service. Which sandboxing directives do you use, and how do you verify them without breaking the application?**
+
+> *What the interviewer is testing:* systemd service hardening, least privilege, and compatibility testing.
+
+**Answer:**
+Systemd can apply a significant amount of sandboxing at the service boundary. I would start with a baseline and add restrictions incrementally, because an overly aggressive seccomp or filesystem policy will cause hard-to-diagnose failures.
+
+A practical baseline is:
+
+```ini
+[Service]
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+ReadWritePaths=/var/lib/myapp
+```
+
+I would use `StateDirectory=`, `RuntimeDirectory=`, and `LogsDirectory=` so systemd creates the writable paths with the correct ownership. For network services, I would consider `IPAddressAllow=` and `IPAddressDeny=`; for seccomp, `SystemCallFilter=@system-service` is a useful starting point, but JIT runtimes and some databases need exceptions. `MemoryDenyWriteExecute=yes` is good for many services but breaks runtimes that generate executable memory.
+
+Before deploying, I would run `systemd-analyze verify` and `systemd-analyze security myapp.service`, apply the change to a canary, and watch `journalctl` for permission denials. I would compare the exposure score before and after, then roll out gradually. Hardening is not a one-time checklist; it is a compatibility-tested reduction in privilege.
+
+---
+
+**Q93. [L2] After an instance rebuild, SSH prints "REMOTE HOST IDENTIFICATION HAS CHANGED" for a production host. A teammate says to just delete the `known_hosts` entry. What is the correct response?**
+
+> *What the interviewer is testing:* SSH host-key verification, MITM awareness, and safe incident handling.
+
+**Answer:**
+That warning means the host key presented by the server does not match the key previously recorded for that hostname or IP. It can be legitimate after a rebuild, reimage, or key rotation, but it can also indicate a man-in-the-middle attack or DNS/IP hijacking. Deleting the entry without verification throws away the only signal SSH has.
+
+I would verify the new fingerprint out of band: through the cloud console, a serial console, an infrastructure inventory, a Terraform output, or a known-good configuration-management record. I would compare the full SHA256 fingerprint, not just trust `ssh-keyscan`, because `ssh-keyscan` simply asks the same potentially compromised endpoint what key it has.
+
+If the change is legitimate, I would remove only that host's old key and reconnect:
+
+```bash
+ssh-keygen -R server.example.com
+ssh -o StrictHostKeyChecking=accept-new server.example.com
+ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+```
+
+If it is not explained, I would stop, isolate the host or network path, and investigate. Long term, use an SSH certificate authority with host certificates, manage `known_hosts` through configuration management, and avoid disabling strict host-key checking globally.
+
+---
+
+**Q94. [L3] A latency-sensitive database has periodic latency spikes even though CPU utilization is low. `perf` shows time in compaction, and `/proc/vmstat` shows rising `compact_stall`. What is happening, and how do you address it?**
+
+> *What the interviewer is testing:* Transparent Huge Pages, memory compaction, and latency-sensitive tuning.
+
+**Answer:**
+This pattern points to Transparent Huge Pages (THP) and direct compaction. THP tries to back memory with 2 MB pages instead of 4 KB pages. That can improve TLB efficiency for some workloads, but allocating a huge page may require the kernel to compact fragmented memory synchronously. When compaction stalls the allocating thread, the application sees latency spikes unrelated to CPU load.
+
+I would confirm the settings and counters:
+
+```bash
+cat /sys/kernel/mm/transparent_hugepage/enabled
+cat /sys/kernel/mm/transparent_hugepage/defrag
+grep -E 'compact_stall|compact_fail|thp_' /proc/vmstat
+perf top
+```
+
+For a latency-sensitive database, I would switch THP from `always` to `madvise` or `never`, and disable synchronous defrag, then retest under realistic load. On many systems the runtime setting is:
+
+```bash
+echo madvise > /sys/kernel/mm/transparent_hugepage/enabled
+echo madvise > /sys/kernel/mm/transparent_hugepage/defrag
+```
+
+I would make the change persistent through the kernel command line or a tuned profile, not just a shell command that disappears on reboot. I would also check NUMA balancing and memory pressure, because compaction is often a symptom of fragmentation rather than the only problem.
+
+The tradeoff matters: THP can help throughput-oriented workloads, so this should be a measured change for the affected service, not a blanket host-wide guess.
+
+---
+
+**Q95. [L2] A security audit finds API tokens in `/var/backups` are readable by every local user. The files were created by an application with mode `0644`. How do you fix the exposure and prevent it from happening again?**
+
+> *What the interviewer is testing:* umask, file creation permissions, secret handling, and defense in depth.
+
+**Answer:**
+A file mode of `0644` is the result of the process's requested mode combined with its umask. With a typical umask of `022`, a request for `0666` becomes `0644`, which is world-readable. For secrets, the application should request `0600` and the service should run with a restrictive umask such as `0077`.
+
+First I would contain the exposure: restrict the directory and files, identify every affected file, and rotate any token that may have been read by an unauthorized user. Changing permissions does not undo a prior leak.
+
+```bash
+chmod 700 /var/backups/myapp
+find /var/backups/myapp -type f -exec chmod 600 {} \;
+chown -R myapp:myapp /var/backups/myapp
+```
+
+Then I would fix creation at the source. For a systemd service, set `UMask=0077` in the unit. In a shell script, call `umask 077` before creating files. In application code, pass `0o600` to `open()` and use atomic creation with `O_EXCL` so there is no window where the file is readable. A post-write `chmod` is a race condition, not a security control.
+
+I would also audit for other world-readable secrets with `find` and a secrets scanner, move long-lived credentials into a secret manager, and add a test that checks the permissions of newly created files. The interviewer is testing whether you understand that umask is inherited, not a global setting.
+
+---
+
+**Q96. [L2] A team wants to launch a new payment service on Friday evening. As the SRE, what does your production readiness review cover, and what would make you say no?**
+
+> *What the interviewer is testing:* Production readiness, operational ownership, and risk-based launch decisions.
+
+**Answer:**
+A production readiness review is evidence that the service can be operated, observed, and recovered, not a checklist completed by the development team alone. I would review:
+
+- **Reliability:** SLIs and SLOs, error budget, dependency failure modes, timeouts, retries, circuit breakers, and graceful degradation.
+- **Observability:** dashboards, logs, metrics, traces, alert ownership, and a tested alert path.
+- **Operations:** runbooks, on-call rotation, escalation, rollback, feature flags, and a tested canary process.
+- **Capacity:** load test results at expected peak and at least one failure scenario, plus autoscaling limits.
+- **Data:** backup and restore testing, migration and rollback plan, retention, and RTO/RPO.
+- **Security:** secrets management, least privilege, vulnerability scan results, and audit logging.
+- **Change safety:** deployment window, staffing, customer communication, and a clear go/no-go owner.
+
+I would not approve a Friday-evening launch for a payment path unless there was a compelling business reason and full staffing through the weekend. A Friday deploy reduces the time to detect and recover before the team disperses, and it makes rollback harder to coordinate.
+
+If gaps are minor, I would approve conditionally with named owners and deadlines. If rollback is untested, alerts have no owner, or the service has no capacity evidence, I would delay. The goal is not to block delivery; it is to make the risk explicit and owned.
+
+---
+
+**Q97. [L3] During a major outage, thirty engineers join the incident bridge, everyone is debugging, and no one is communicating with customers or making decisions. How do you structure incident command?**
+
+> *What the interviewer is testing:* Incident command, role clarity, communication cadence, and escalation.
+
+**Answer:**
+The problem is not a lack of engineers; it is a lack of command structure. I would assign an Incident Commander (IC) who owns coordination and decisions, not hands-on debugging. The IC maintains the timeline, confirms severity, sets the next update time, and keeps the responders focused on the current mitigation.
+
+A practical structure is:
+
+- **Incident Commander:** decision-maker and coordinator.
+- **Operations Lead:** owns the technical investigation and mitigation.
+- **Communications Lead:** owns the status page, customer updates, and executive communication.
+- **Scribe/Planning:** records timeline, hypotheses, actions, and owners.
+- **Subject-matter experts:** brought in for specific questions, then released.
+
+I would open a dedicated incident channel, state the severity and customer impact, assign roles explicitly, and establish a cadence: for example, a status update every 15 minutes even if there is no new information. The IC should ask "what is the smallest safe action that restores service?" and prefer rollback, failover, or feature disablement over diagnosing the root cause while customers are down.
+
+I would also define a handoff process for long incidents, keep a single source of truth for actions, and separate technical chatter from stakeholder updates. After stabilization, the IC closes the incident and schedules the postmortem. The measure of success is coordinated mitigation, not how many people were on the bridge.
+
+---
+
+**Q98. [L3] Traffic doubles unexpectedly, the database is saturated, autoscaling cannot add capacity fast enough, and latency is climbing. How do you use load shedding and admission control to protect the service?**
+
+> *What the interviewer is testing:* Overload management, prioritization, and graceful degradation.
+
+**Answer:**
+When demand exceeds capacity, accepting every request makes the system slower for everyone and can turn a partial degradation into a total outage. Load shedding deliberately rejects or delays work early so the system can continue serving its most important traffic.
+
+I would define priorities before the incident: critical user journeys, paid versus background work, interactive versus batch, and health checks. Then I would enforce limits at the edge and inside the service:
+
+- Cap concurrent requests per instance and per tenant.
+- Bound queue lengths and reject when the queue is full.
+- Use a token bucket or rate limit for expensive endpoints.
+- Return `429 Too Many Requests` or `503 Service Unavailable` with `Retry-After`.
+- Disable non-critical features, batch jobs, and prefetching.
+- Apply timeouts and circuit breakers to slow dependencies.
+
+The limits should be based on measured capacity and load tests, not arbitrary numbers. I would monitor accepted versus rejected requests, queue depth, saturation, and latency for the protected journeys. I would also make sure health checks and internal control-plane traffic are not shed, and that rejection is fair across tenants so one noisy customer cannot consume the entire budget.
+
+Autoscaling is still useful, but it is reactive and has a delay. Load shedding is the immediate control that protects the system while capacity catches up.
+
+---
+
+**Q99. [L3] A downstream service becomes slow, so every client retries three times. The extra traffic makes the downstream service fail completely. How do you prevent a retry storm?**
+
+> *What the interviewer is testing:* Retry amplification, backoff, deadlines, and resilience patterns.
+
+**Answer:**
+Retries are useful only when the failure is transient and the operation is safe to repeat. If every caller retries three times and each retry also times out, the load can multiply by four or more exactly when the dependency is least able to handle it. That is retry amplification.
+
+I would apply several controls together:
+
+1. **Retry only idempotent operations** or use idempotency keys so duplicate requests are safe.
+2. **Use exponential backoff with jitter**, not immediate fixed retries.
+3. **Cap attempts and total elapsed time**, and propagate a deadline so a retry does not outlive the caller's request.
+4. **Add a retry budget**, such as retrying no more than 10% of successful request volume, and stop retrying when the budget is exhausted.
+5. **Use circuit breakers** to fail fast while the dependency is unhealthy.
+6. **Retry at one layer**, not at the edge, service, SDK, and database driver simultaneously.
+
+I would also add server-side admission control and idempotency/deduplication, because clients cannot be trusted to behave. Monitoring should track retry rate, success-after-retry, downstream saturation, and the ratio of original to retried requests.
+
+During the incident, I would reduce retries or disable them at the edge first, shed low-priority traffic, and let the dependency recover. The long-term fix is a documented retry policy with owned defaults in the shared client library, not a per-team guess.
+
+---
+
+**Q100. [L3] A nightly batch pipeline must finish by 6 AM, but the team only has an availability SLO that was copied from an API. How do you define meaningful SLIs and SLOs for batch work?**
+
+> *What the interviewer is testing:* Batch reliability, freshness/completeness SLIs, error budgets, and business impact.
+
+**Answer:**
+An availability percentage does not describe whether a batch pipeline delivered correct, complete data on time. For batch systems I would define several SLIs:
+
+- **Freshness:** age of the newest successfully processed record or partition.
+- **Completeness:** percentage of expected records or partitions processed.
+- **Timeliness:** percentage of runs that finish before the business deadline.
+- **Correctness:** percentage of records passing validation and reconciliation.
+- **Durability/recoverability:** whether a failed run can be safely rerun and backfilled.
+
+An example SLO could be: 99% of nightly runs complete by 6 AM, 99.9% of expected partitions are processed, and the data watermark is no more than one hour behind by the deadline. The exact targets should come from the business contract, not from an API's uptime number.
+
+I would measure per pipeline and per partition where possible, because an aggregate "job succeeded" can hide one missing customer partition. I would define exclusions carefully, such as upstream data arriving late, and track those separately so the team does not get credit for a failure it does not control.
+
+The error budget is expressed in missed deadlines or incomplete runs per month. When the budget is exhausted, reliability work takes priority over new pipeline features. Alerts should fire on watermark lag and predicted deadline miss, not just on a job exiting non-zero after the deadline has already passed. Backfills and reruns need their own runbooks and idempotency guarantees.

@@ -750,3 +750,94 @@ This illustrates the **fundamental difference** between AWS's internal backbone 
 
 **Recommended for high-throughput S3 (same region or cross-region):**
 Use **S3 VPC Gateway Endpoint** (free, no data transfer charges) for all inter-region S3 access. It keeps traffic on the backbone and avoids the IGW bottleneck, achieving near-link-speed throughput.
+
+---
+
+**Q47. [L2] After putting an Application Load Balancer in front of your application, backend logs show only private IPs from the load balancer instead of real customer IPs. Rate limiting and audit logs now attribute every request to the same address. How do you recover the real client IP safely?**
+
+> *What the interviewer is testing:* Layer 7 proxying, `X-Forwarded-For`, trusted proxies, and spoofing risks.
+
+**Answer:**
+An ALB terminates the client's TCP connection and opens a new connection to the target. At the network layer, the backend therefore sees the ALB's address, not the client's. The ALB adds HTTP headers such as `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Port` so the application can reconstruct the original request context.
+
+For Nginx, the safe configuration is:
+
+```nginx
+set_real_ip_from 10.0.0.0/16;   # trusted ALB/subnet ranges only
+real_ip_header X-Forwarded-For;
+real_ip_recursive on;
+```
+
+The application framework also needs to trust the proxy. For example, Express uses `app.set('trust proxy', ...)`, and Django uses `USE_X_FORWARDED_HOST`/`SECURE_PROXY_SSL_HEADER` with a carefully scoped trusted-proxy setting. Enabling "trust every proxy" globally allows a client to spoof its own address.
+
+`X-Forwarded-For` is a comma-separated chain. Because a client can send a fake header, the edge proxy must append the address it actually observed, and the backend should parse from the trusted end of the chain rather than blindly taking the leftmost value. I would strip or overwrite untrusted client-supplied forwarding headers at the edge and test with a request such as `curl -H 'X-Forwarded-For: 1.2.3.4' ...` to confirm the spoofed value is not trusted.
+
+For TCP or UDP workloads on an NLB, source IP preservation works differently: an NLB can preserve the client IP for IP targets, and Proxy Protocol v2 can carry it for supported TCP listeners. ALB does not use Proxy Protocol, so HTTP headers are the correct mechanism there. The key is to log both the immediate peer and the validated client IP, and to apply rate limits only to the validated value.
+
+---
+
+**Q48. [L2] Someone connects both ends of a spare switch into the office network. Suddenly, every switch's MAC address table is unstable and the whole floor slows to a crawl. What is happening, and how do you prevent it?**
+
+> *What the interviewer is testing:* Layer 2 loops, broadcast storms, Spanning Tree Protocol, and switch port security.
+
+**Answer:**
+Ethernet has no TTL at Layer 2. If there are two paths between switches, a broadcast frame can circulate forever, and switches flood unknown unicast and broadcast frames out every port. The result is a broadcast storm, MAC table thrashing, and rapidly rising CPU and link utilization. The network appears "slow" because useful frames are competing with an endless loop.
+
+Spanning Tree Protocol (STP) exists to prevent this. Switches elect a root bridge, exchange BPDUs, and block redundant ports so there is exactly one active path. Rapid STP (RSTP) converges faster, but it still needs to be enabled and correctly designed.
+
+On a Cisco-style switch I would inspect:
+
+```text
+show spanning-tree
+show mac address-table
+show interfaces status
+show interfaces counters errors
+```
+
+I would identify the looping port and shut it down immediately, then confirm the storm stops. `tcpdump -n -e` can show repeated broadcast frames and changing source ports.
+
+Prevention is more important than cleanup. Enable BPDU Guard on access ports so a switch or rogue device that sends BPDUs is err-disabled, use Root Guard on ports facing downstream switches, enable storm control, and never disable STP to "fix" a loop. Document the physical topology and label ports. An unmanaged switch plugged into two wall ports is a common cause, and the network should fail that port safely rather than take down the floor.
+
+---
+
+**Q49. [L3] Users intermittently get DNS `SERVFAIL` or resolution timeouts. Small queries work, but large DNSSEC-signed responses and TXT lookups fail. The firewall allows UDP port 53 but not TCP port 53. What is the root cause?**
+
+> *What the interviewer is testing:* DNS transport, EDNS0, truncation, TCP fallback, and firewall troubleshooting.
+
+**Answer:**
+Classic DNS over UDP has a 512-byte payload limit. EDNS0 lets a resolver advertise a larger UDP buffer, but large responses, DNSSEC signatures, and some TXT records can still exceed the path MTU or the negotiated buffer. When that happens, the server sets the truncation (`TC`) bit and the resolver is expected to retry over TCP port 53. If TCP/53 is blocked, the lookup fails or returns `SERVFAIL` even though basic UDP queries work.
+
+I would confirm the behavior with:
+
+```bash
+dig example.com
+dig +bufsize=4096 example.com
+dig +tcp example.com
+dig +ignore example.com
+tcpdump -ni any port 53
+```
+
+The `+tcp` query bypasses the UDP path entirely. If it succeeds while the normal query fails, the firewall or a middlebox is almost certainly blocking TCP fallback or dropping fragmented UDP. I would check security groups, NACLs, host firewalls, and any DNS-aware proxy between the resolver and the internet.
+
+The fix is to allow TCP/53 in both directions for the resolver, not to disable DNSSEC or force a tiny buffer. I would also ensure UDP fragmentation is not being dropped silently, and monitor resolver errors and truncation rates. For a fleet, use a local caching resolver or Route 53 Resolver so clients do not depend on fragile direct paths to external DNS servers. The key insight is that DNS is not UDP-only; TCP fallback is part of the protocol.
+
+---
+
+**Q50. [L2] A VPC route table has `10.0.0.0/16` pointing to a Transit Gateway and `10.0.1.0/24` pointing to a VPC peering connection. Traffic to `10.0.1.10` unexpectedly takes the peering path and bypasses the central firewall. Why, and how do you fix the routing design?**
+
+> *What the interviewer is testing:* Longest-prefix match, route table association, and centralized network security.
+
+**Answer:**
+AWS route tables use longest-prefix match: the most specific route that matches the destination wins. A `/24` is more specific than a `/16`, so traffic to `10.0.1.10` follows the peering route even though the `/16` Transit Gateway route also matches. This is normal routing behavior, not a bug, but it can silently bypass a central inspection or egress path.
+
+I would inspect the effective route table and confirm which subnet is associated with it:
+
+```bash
+aws ec2 describe-route-tables \
+  --filters Name=vpc-id,Values=vpc-1234567890abcdef0 \
+  --query 'RouteTables[].{Routes:Routes,Associations:Associations}'
+```
+
+I would then trace the path with `traceroute`, VPC Flow Logs, or AWS Network Manager Reachability Analyzer. The fix depends on intent: remove the more specific peering route if all traffic should go through the Transit Gateway, or attach the peering route only to the route tables for subnets that are explicitly allowed to bypass inspection. If the more specific route is a blackhole for a decommissioned subnet, remove it or document it as intentional.
+
+The design lesson is to treat CIDR hierarchy as part of the security model. Document which prefixes are owned by which VPC or route domain, avoid overlapping ranges, review route tables whenever a new peering or TGW attachment is added, and test reachability after every change. A route that "looks right" in a diagram can still lose to a more specific route in the actual table.

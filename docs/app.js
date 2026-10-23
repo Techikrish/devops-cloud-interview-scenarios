@@ -50,7 +50,7 @@ const DOMAINS = [
     emoji: '🐧',
     title: 'Linux / SRE',
     desc: 'System administration, performance tuning, incident response',
-    count: 80,
+    count: 100,
     color: '#e95420',
     file: 'linux-sre/scenarios.md'
   },
@@ -68,7 +68,7 @@ const DOMAINS = [
     emoji: '🌐',
     title: 'Networking',
     desc: 'VPCs, security groups, routing, DNS, load balancing',
-    count: 46,
+    count: 50,
     color: '#00a8e8',
     file: 'networking/scenarios.md'
   },
