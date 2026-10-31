@@ -1,8 +1,8 @@
-# 🚀 DevOps & Cloud — Scenario-Based Interview Questions
+# 🚀 DevOps, Cloud & AI Engineering — Scenario-Based Interview Q&A
 
-> **930 real-world scenario questions with plain-language answers** — covering Kubernetes, AWS, CI/CD, Terraform, Docker, Linux/SRE, Observability, Networking, Security, and Git.
+> **1,000 real-world questions with plain-language answers** — covering Kubernetes, AWS, CI/CD, Terraform, Docker, Linux/SRE, Observability, Networking, Security, Git, and AI Engineering.
 
-This repo was built as a study companion for DevOps and Cloud engineers preparing for interviews at all levels. The focus is on **scenario-based questions** — the kind where an interviewer describes a real situation and asks *"what would you do?"* — because that's how mid-to-senior interviews actually work.
+This repo was built as a study companion for DevOps, Cloud, and AI engineers preparing for interviews at all levels. The focus is on **scenario-based questions** — the kind where an interviewer describes a real situation and asks *"what would you do?"* — because that's how mid-to-senior interviews actually work.
 
 ---
 
@@ -23,6 +23,7 @@ devops-cloud-interview-scenarios/
 ├── 🔒 security/scenarios.md            40 questions
 ├── ⚙️ general-devops/scenarios.md      40 questions
 ├── 🌳 git/scenarios.md                 50 questions
+├── 🤖 ai-engineering/scenarios.md      70 questions
 ├── 📄 README.md (this file)
 ├── 🤝 CONTRIBUTING.md                  (how to contribute)
 ├── 📜 LICENSE
@@ -44,6 +45,18 @@ devops-cloud-interview-scenarios/
 | 🔒 [Security](./security/scenarios.md) | IAM, secrets, encryption, compliance, supply chain | 40 |
 | ⚙️ [General DevOps](./general-devops/scenarios.md) | Cross-domain, disaster recovery, automation | 40 |
 | 🌳 [Git](./git/scenarios.md) | Version control, branching, rebases, conflicts, recovery, history rewriting | 50 |
+| 🤖 [AI Engineering](./ai-engineering/scenarios.md) | LLM foundations, RAG, fine-tuning, inference, agents, LLMOps | 70 |
+
+### 🤖 AI Engineering Path
+
+The AI domain is concept-first: **20 plain-English concept questions** followed by **50 production scenarios**.
+
+1. **Foundations** (10) — tokens, embeddings, context, sampling
+2. **Training & Fine-Tuning** (10) — pretraining, LoRA, data quality, forgetting
+3. **RAG** (14) — chunking, hybrid search, reranking, citations, injection
+4. **Inference & Serving** (12) — prefill/decode, KV cache, batching, GPU sizing
+5. **Agents & Tool Use** (8) — tool calling, loops, memory, guardrails
+6. **Production AI / LLMOps** (16) — evals, cost, latency, safety, incident response
 
 ---
 
@@ -55,9 +68,9 @@ We also built a **companion website** so you can browse the same material in a b
 
 **Features**
 
-- 🔍 Search across **930+** scenarios instantly
+- 🔍 Search across **1,000+** scenarios instantly
 - 📊 Difficulty levels: **L1** (Fresher), **L2** (Mid), **L3** (Senior)
-- 🗂️ **11 domains** — Kubernetes, AWS, Terraform, CI/CD, Docker, Linux/SRE, Observability, Networking, Security, Git, and more
+- 🗂️ **12 domains** — Kubernetes, AWS, Terraform, CI/CD, Docker, Linux/SRE, Observability, Networking, Security, Git, AI Engineering, and more
 - 🔖 Bookmarks for last-minute review
 - 🌙 Dark & light themes, no ads, no tracking
 
@@ -71,9 +84,9 @@ After that, we shipped an **Android app** that packages the same scenario Q&A fo
 
 **Features**
 
-- 🔍 Search across **930+** scenarios instantly — offline
+- 🔍 Search across **1,000+** scenarios instantly — offline
 - 📊 Difficulty levels: **L1** (Fresher), **L2** (Mid), **L3** (Senior)
-- 🗂️ **11 domains** — Kubernetes, AWS, Terraform, CI/CD, Docker, Linux/SRE, Observability, Networking, Security, Git, and more
+- 🗂️ **12 domains** — Kubernetes, AWS, Terraform, CI/CD, Docker, Linux/SRE, Observability, Networking, Security, Git, AI Engineering, and more
 - 🔖 Bookmarks for last-minute review
 - 🌙 Dark mode, no ads, no tracking, **100% offline**
 
@@ -158,7 +171,7 @@ This repository is licensed under the MIT License. See [LICENSE](./LICENSE) for 
 
 ## 🙏 Acknowledgments
 
-This repo is maintained by the community. Every scenario, improvement, and contribution comes from real DevOps and Cloud engineers preparing for interviews or helping others succeed.
+This repo is maintained by the community. Every scenario, improvement, and contribution comes from real DevOps, Cloud, and AI engineers preparing for interviews or helping others succeed.
 
 **Maintained by the community. PRs and contributions welcome.** 💙
 

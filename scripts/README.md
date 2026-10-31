@@ -20,19 +20,26 @@ python scripts/check_duplicates.py
 ```
 🔍 Checking for duplicate questions...
 
-📁 Found 6 scenario files:
-   - aws/scenarios.md
-   - ci-cd/scenarios.md
-   - docker/scenarios.md
-   - general-devops/scenarios.md
-   - linux-sre/scenarios.md
-   - networking/scenarios.md
+📁 Found 12 scenario files:
+   - ./ai-engineering/scenarios.md
+   - ./aws/scenarios.md
+   - ./ci-cd/scenarios.md
+   - ./docker/scenarios.md
+   - ./general-devops/scenarios.md
+   - ./git/scenarios.md
+   - ./kubernetes/scenarios.md
+   - ./linux-sre/scenarios.md
+   - ./networking/scenarios.md
+   - ./observability/scenarios.md
+   - ./security/scenarios.md
+   - ./terraform/scenarios.md
 
-✅ Extracted 120 questions from aws/scenarios.md
-✅ Extracted 120 questions from ci-cd/scenarios.md
+✅ Extracted 70 questions from ./ai-engineering/scenarios.md
+✅ Extracted 120 questions from ./aws/scenarios.md
+✅ Extracted 100 questions from ./ci-cd/scenarios.md
 ...
 
-📊 Total questions found: 720
+📊 Total questions found: 1000
 
 ✅ No duplicate questions found!
 ```
