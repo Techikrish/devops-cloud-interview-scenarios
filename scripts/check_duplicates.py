@@ -67,8 +67,8 @@ def get_all_scenario_files(root_dir='.'):
     """
     scenario_files = []
     for root, dirs, files in os.walk(root_dir):
-        # Skip hidden directories and scripts
-        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        # Skip hidden directories and the generated docs/ copies
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'docs']
         
         if 'scenarios.md' in files:
             file_path = os.path.join(root, 'scenarios.md')

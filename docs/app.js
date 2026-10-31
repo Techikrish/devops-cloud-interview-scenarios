@@ -98,6 +98,15 @@ const DOMAINS = [
     count: 50,
     color: '#f1502f',
     file: 'git/scenarios.md'
+  },
+  {
+    id: 'ai-engineering',
+    emoji: '🤖',
+    title: 'AI Engineering',
+    desc: 'LLM foundations, RAG, fine-tuning, inference, agents, LLMOps',
+    count: 70,
+    color: '#8b5cf6',
+    file: 'ai-engineering/scenarios.md'
   }
 ];
 

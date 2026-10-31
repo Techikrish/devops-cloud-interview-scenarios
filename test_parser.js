@@ -21,6 +21,7 @@ function parseMarkdown(md) {
       let answerLines = [];
 
       i++;
+      while (i < lines.length && lines[i].trim() === '') i++;
       if (i < lines.length && lines[i].startsWith('> *What the interviewer')) {
         note = lines[i].replace(/^> \*/, '').replace(/\*$/, '').trim();
         i++;
@@ -56,7 +57,7 @@ function parseMarkdown(md) {
   return questions;
 }
 
-const domains = ['kubernetes', 'aws', 'ci-cd', 'docker', 'terraform', 'linux-sre', 'observability', 'networking', 'security', 'general-devops'];
+const domains = ['kubernetes', 'aws', 'ci-cd', 'docker', 'terraform', 'linux-sre', 'observability', 'networking', 'security', 'general-devops', 'git', 'ai-engineering'];
 for (const d of domains) {
   const md = fs.readFileSync(`docs/${d}/scenarios.md`, 'utf8');
   const qs = parseMarkdown(md);

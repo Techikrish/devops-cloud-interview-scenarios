@@ -1,4 +1,4 @@
-# 🤝 Contributing to DevOps & Cloud Interview Scenarios
+# 🤝 Contributing to DevOps, Cloud & AI Engineering Interview Scenarios
 
 Thank you for your interest in contributing! This repository thrives on community contributions. Whether you're adding new scenarios, improving existing answers, or fixing typos, your help is valued.
 
@@ -58,6 +58,16 @@ When an app can't reach RDS in a private subnet:
 Most common issue: Security Group rules — the RDS SG doesn't have the app's SG in its inbound rules.
 ```
 
+### AI Engineering Questions
+
+The `ai-engineering/` domain uses a **concept-first** format: each module starts with plain-English concept questions, then moves into production scenarios. When contributing there:
+
+- Explain the idea with an everyday analogy before introducing terminology.
+- Define every acronym on first use.
+- Separate retrieval failures from generation failures instead of blaming "the model."
+- Prefer concrete checks, metrics, and fixes over theory.
+- Write original explanations; do not copy content from other sites.
+
 ---
 
 ## 🗂️ File Organization
@@ -75,6 +85,8 @@ observability/scenarios.md
 networking/scenarios.md
 security/scenarios.md
 general-devops/scenarios.md
+git/scenarios.md
+ai-engineering/scenarios.md
 ```
 
 **Choose the right domain:**
@@ -84,6 +96,7 @@ general-devops/scenarios.md
 - Monitoring/logging? → `observability/`
 - Firewalls/VPCs/routing? → `networking/`
 - Compliance/secrets/keys? → `security/`
+- LLMs, RAG, inference, agents, or AI production operations? → `ai-engineering/`
 - Odd mix or doesn't fit? → `general-devops/`
 
 ---
