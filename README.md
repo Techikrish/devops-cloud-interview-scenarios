@@ -76,7 +76,7 @@ We also built a **companion website** so you can browse the same material in a b
 
 **Live site:** [techikrish.github.io/devops-cloud-interview-scenarios](https://techikrish.github.io/devops-cloud-interview-scenarios/)
 
-![DevOps interview scenario Q&A — web landing (dark theme)](./assets/website-screenshot.png)
+![DevOps, Cloud & AI Engineering interview Q&A — web landing (dark theme)](./assets/website-screenshot-1000.png)
 
 ### Android app (offline)
 
@@ -91,8 +91,6 @@ After that, we shipped an **Android app** that packages the same scenario Q&A fo
 - 🌙 Dark mode, no ads, no tracking, **100% offline**
 
 **Get it on Google Play:** [DevOps & Cloud Interview Hub](https://play.google.com/store/apps/details?id=com.techikrish.devopsinterviewhub&hl=en_IN)
-
-![DevOps interview scenario Q&A — Android app home](./assets/android-app-screenshot.png)
 
 ---
 
